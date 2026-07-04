@@ -11,6 +11,11 @@ import {
 	vector
 } from 'drizzle-orm/pg-core';
 
+// better-auth's tables (user/session/account/verification + org plugin), emitted
+// by `@better-auth/cli generate`. Re-exported so `drizzle-kit push` creates them
+// and the better-auth drizzle adapter resolves them.
+export * from './auth-schema';
+
 /**
  * Drizzle schema — the production Postgres model mirroring @insightlibrary/schemas.
  * pgvector powers semantic search over document chunks; Postgres FTS (a generated
