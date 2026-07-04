@@ -1,0 +1,28 @@
+{
+  "name": "insightlibrary",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.3",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev --filter=@insightlibrary/app --filter=@insightlibrary/server",
+    "dev:app": "pnpm --filter @insightlibrary/app dev",
+    "dev:server": "pnpm --filter @insightlibrary/server dev",
+    "dev:desktop": "pnpm --filter @insightlibrary/desktop tauri dev",
+    "build": "turbo run build",
+    "build:desktop": "pnpm --filter @insightlibrary/desktop tauri build",
+    "check": "turbo run check",
+    "tauri": "pnpm --filter @insightlibrary/desktop tauri"
+  },
+  "devDependencies": {
+    "turbo": "^2.10.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@tauri-apps/cli"
+    ]
+  }
+}

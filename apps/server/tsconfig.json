@@ -1,0 +1,18 @@
+{
+	"extends": "./.svelte-kit/tsconfig.json",
+	"compilerOptions": {
+		"allowJs": true,
+		"checkJs": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"strict": true,
+		"moduleResolution": "bundler",
+		// seed-runner.ts + worker.ts run via `node --experimental-strip-types`,
+		// which requires explicit .ts import extensions.
+		"allowImportingTsExtensions": true,
+		"noEmit": true
+	}
+}

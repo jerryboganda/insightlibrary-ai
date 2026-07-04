@@ -1,0 +1,34 @@
+{
+  "name": "@insightlibrary/app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "cross-env BUILD_TARGET=desktop vite build",
+    "build:desktop": "cross-env BUILD_TARGET=desktop vite build",
+    "build:web": "cross-env BUILD_TARGET=web vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "@insightlibrary/api-client": "workspace:*",
+    "@insightlibrary/schemas": "workspace:*",
+    "@insightlibrary/ui": "workspace:*",
+    "@lucide/svelte": "^0.560.0",
+    "@tanstack/svelte-query": "^5.90.0",
+    "@tauri-apps/api": "^2.11.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "catalog:",
+    "@sveltejs/kit": "catalog:",
+    "@sveltejs/vite-plugin-svelte": "catalog:",
+    "@tailwindcss/vite": "catalog:",
+    "cross-env": "^7.0.3",
+    "svelte": "catalog:",
+    "svelte-check": "catalog:",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:"
+  }
+}
