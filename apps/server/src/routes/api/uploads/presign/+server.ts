@@ -27,7 +27,9 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
 
 	const client = new S3Client({
-		endpoint: env.S3_ENDPOINT,
+		// Sign against the browser-reachable endpoint (S3_PUBLIC_ENDPOINT) so the
+		// client can PUT directly; the worker downloads via the internal S3_ENDPOINT.
+		endpoint: env.S3_PUBLIC_ENDPOINT || env.S3_ENDPOINT,
 		region: env.S3_REGION ?? 'us-east-1',
 		forcePathStyle: true,
 		credentials: {
