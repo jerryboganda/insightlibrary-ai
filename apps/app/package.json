@@ -17,7 +17,8 @@
     "@insightlibrary/ui": "workspace:*",
     "@lucide/svelte": "^0.560.0",
     "@tanstack/svelte-query": "^5.90.0",
-    "@tauri-apps/api": "^2.11.0"
+    "@tauri-apps/api": "^2.11.0",
+    "better-auth": "^1.6.0"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "catalog:",

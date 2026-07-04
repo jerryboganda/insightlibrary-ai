@@ -13,16 +13,15 @@ backs real multi-tenant sessions via the Drizzle adapter. Web clients use cookie
 sessions; the Tauri client uses the **bearer** plugin with the token stored in
 the OS keyring (`secrets_*` Rust commands).
 
-### Generate better-auth's tables (once)
+### Create better-auth's tables (once)
 
 better-auth owns its own schema (user, session, account, verification, plus the
-organization plugin's org/member/invitation tables). Generate and apply it with
-the official CLI — this reads the config in `src/lib/server/auth.ts`:
+organization plugin's org/member/invitation tables). The static instance lives in
+`src/lib/server/auth-config.ts` (no SvelteKit imports) so the CLI can read it:
 
 ```bash
 cd apps/server
-npx @better-auth/cli generate --output ./drizzle/auth-schema.ts   # emits the schema
-npx @better-auth/cli migrate                                       # applies it to DATABASE_URL
+pnpm db:auth   # = @better-auth/cli migrate --config src/lib/server/auth-config.ts -y
 ```
 
 Then apply the app schema and seed:

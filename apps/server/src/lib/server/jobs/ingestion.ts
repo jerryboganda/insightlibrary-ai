@@ -1,6 +1,8 @@
 // process.env (not $env/dynamic/private) so this module loads both inside the
 // SvelteKit server AND in the standalone pg-boss worker (jobs/worker.ts).
 import { chunkText, embedText } from '../ai/embeddings';
+import { extractText } from '../ingestion/extract';
+import { downloadObject } from '../storage/s3';
 
 /**
  * Document ingestion pipeline: extract → chunk → embed → index.
@@ -16,8 +18,10 @@ import { chunkText, embedText } from '../ai/embeddings';
 export interface IngestionJob {
 	documentId: string;
 	documentTitle: string;
-	/** Extracted document text, when available (real embed/index path). */
+	/** Extracted document text, when the caller already has it. */
 	text?: string;
+	/** S3/MinIO object key — the worker downloads + extracts it (PDF/EPUB/text). */
+	storageKey?: string;
 }
 
 export const INGESTION_QUEUE = 'document-ingestion';
@@ -73,9 +77,13 @@ export async function runIngestion(job: IngestionJob): Promise<void> {
 	const step = (stage: string, progress: number, message: string) =>
 		emit({ documentId: job.documentId, documentTitle: job.documentTitle, stage, progress, message });
 
-	// 1. Extract
-	step('extract', 12, 'Extracting text (pdfium / OCR)');
-	const text = job.text?.trim();
+	// 1. Extract — real parsing of the uploaded file (PDF/EPUB/text) from S3.
+	step('extract', 12, 'Extracting text');
+	let text = job.text?.trim();
+	if (!text && job.storageKey) {
+		const bytes = await downloadObject(job.storageKey);
+		if (bytes) text = (await extractText(bytes, job.storageKey)).trim();
+	}
 	if (!text) {
 		// No text available (binary PDF needs pdfium + the file). Simulate the
 		// remaining stages so the processing UI still advances, then finish.

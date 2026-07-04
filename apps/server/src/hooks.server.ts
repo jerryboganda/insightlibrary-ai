@@ -57,7 +57,11 @@ const auth: Handle = async ({ event, resolve }) => {
 	}
 
 	try {
-		const authApi = await getAuth();
+		const authApi = getAuth();
+		if (!authApi) {
+			event.locals.user = null;
+			return resolve(event);
+		}
 		const session = await authApi.api.getSession({ headers: event.request.headers });
 		if (session?.user) {
 			const u = session.user;

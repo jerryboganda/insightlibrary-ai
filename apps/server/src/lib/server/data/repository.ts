@@ -1,3 +1,4 @@
+import { computeCoverage } from './coverage';
 import type {
 	AuditLog,
 	Claim,
@@ -40,6 +41,7 @@ export interface Repository {
 		title: string;
 		type: Document['type'];
 		pages: number;
+		storageKey?: string;
 	}): Promise<Document>;
 	listSources(): Promise<Source[]>;
 
@@ -136,6 +138,7 @@ export class InMemoryRepository implements Repository {
 		title: string;
 		type: Document['type'];
 		pages: number;
+		storageKey?: string;
 	}) {
 		const doc: Document = {
 			id: `doc_${this.state.documents.length + 1}`,
@@ -164,8 +167,10 @@ export class InMemoryRepository implements Repository {
 	async getTopic(id: string) {
 		return clone(this.state.topics.find((t) => t.id === id) ?? null);
 	}
-	async getCoverage() {
-		return clone(this.state.coverage);
+	async getCoverage(topicId: string) {
+		// Computed from the topic's real claim citations (see coverage.ts).
+		const topic = this.state.topics.find((t) => t.id === topicId) ?? null;
+		return computeCoverage(clone(topic));
 	}
 	async getDelta() {
 		return clone(this.state.delta);

@@ -24,8 +24,9 @@ import type {
 } from '@insightlibrary/schemas';
 import type { Repository } from './repository';
 import * as schema from '../db/schema';
-import { seedCoverage, seedDelta, seedEvaluation } from './seed';
+import { seedDelta, seedEvaluation } from './seed';
 import { embedText } from '../ai/embeddings';
+import { computeCoverage } from './coverage';
 
 /**
  * Postgres/Drizzle implementation of the Repository contract. Activated when
@@ -124,6 +125,7 @@ export class PostgresRepository implements Repository {
 		title: string;
 		type: Document['type'];
 		pages: number;
+		storageKey?: string;
 	}): Promise<Document> {
 		const id = `doc_${Date.now()}`;
 		const [r] = await this.db
@@ -134,6 +136,7 @@ export class PostgresRepository implements Repository {
 				title: input.title,
 				type: input.type,
 				pages: input.pages,
+				storageKey: input.storageKey ?? null,
 				status: 'processing',
 				statusLabel: 'Processing (queued)'
 			})
@@ -181,8 +184,9 @@ export class PostgresRepository implements Repository {
 			sections: r.sections as Topic['sections']
 		};
 	}
-	async getCoverage(): Promise<CoverageRow[]> {
-		return seedCoverage;
+	async getCoverage(topicId: string): Promise<CoverageRow[]> {
+		// Computed from the topic's real claim citations (see coverage.ts).
+		return computeCoverage(await this.getTopic(topicId));
 	}
 	async getDelta(): Promise<DeltaEntry[]> {
 		return seedDelta;

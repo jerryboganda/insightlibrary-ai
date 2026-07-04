@@ -23,9 +23,15 @@ const createSchema = z.object({
 export const POST: RequestHandler = async ({ request }) => {
 	const parsed = createSchema.safeParse(await request.json().catch(() => null));
 	if (!parsed.success) throw error(400, 'Invalid document payload');
-	const { content, ...meta } = parsed.data;
-	const doc = await getRepository().createDocument(meta);
-	// Kick off the ingestion pipeline (extract → chunk → embed → index).
-	await enqueueIngestion({ documentId: doc.id, documentTitle: doc.title, text: content });
+	const { content, storageKey, ...meta } = parsed.data;
+	const doc = await getRepository().createDocument({ ...meta, storageKey });
+	// Kick off the ingestion pipeline: download from S3 → extract → chunk →
+	// embed → index. `content` short-circuits the download when text is provided.
+	await enqueueIngestion({
+		documentId: doc.id,
+		documentTitle: doc.title,
+		text: content,
+		storageKey
+	});
 	return json(doc, { status: 201 });
 };

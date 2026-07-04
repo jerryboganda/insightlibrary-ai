@@ -2,18 +2,51 @@
 	import { goto } from '$app/navigation';
 	import { BookOpen, Loader2 } from '@lucide/svelte';
 	import { Button, Input, Card } from '$lib/components/ui';
+	import { authClient } from '$lib/auth-client';
+	import { api } from '$lib/api';
 
+	let mode = $state<'signin' | 'signup'>('signin');
+	let name = $state('');
 	let email = $state('admin@insightlibrary.ai');
 	let password = $state('');
 	let loading = $state(false);
+	let errorMsg = $state('');
 
-	// Dev: auth is bypassed server-side (seeded admin), so sign-in just enters.
-	// With DATABASE_URL, wire this to better-auth's email/password endpoint.
-	async function signIn() {
+	async function submit() {
 		loading = true;
-		await new Promise((r) => setTimeout(r, 400));
-		loading = false;
-		goto('/');
+		errorMsg = '';
+		try {
+			// Detect whether the server has auth enabled (production DB) or is in
+			// dev-bypass mode; in bypass mode any credentials just enter.
+			const session = await api.session();
+			const authActive = !session.authenticated || session.user === null;
+
+			if (!authActive) {
+				goto('/');
+				return;
+			}
+
+			const res =
+				mode === 'signup'
+					? await authClient.signUp.email({ email, password, name: name || email })
+					: await authClient.signIn.email({ email, password });
+
+			if (res.error) {
+				// In dev-bypass the auth endpoints 501; treat that as "just enter".
+				if (res.error.status === 501) {
+					goto('/');
+					return;
+				}
+				errorMsg = res.error.message ?? 'Authentication failed';
+				return;
+			}
+			goto('/');
+		} catch {
+			// Network/dev fallback — let the user in (dev bypass serves seeded data).
+			goto('/');
+		} finally {
+			loading = false;
+		}
 	}
 </script>
 
@@ -21,12 +54,22 @@
 	<div class="w-full max-w-sm">
 		<div class="mb-8 flex flex-col items-center gap-3 text-center">
 			<div class="rounded-xl bg-indigo-500/10 p-3 text-indigo-400"><BookOpen class="h-7 w-7" /></div>
-			<h1 class="text-2xl font-bold tracking-tight text-zinc-100">InsightLibrary <span class="text-indigo-400">AI</span></h1>
-			<p class="text-sm text-zinc-500">Sign in to your knowledge workspace</p>
+			<h1 class="text-2xl font-bold tracking-tight text-zinc-100">
+				InsightLibrary <span class="text-indigo-400">AI</span>
+			</h1>
+			<p class="text-sm text-zinc-500">
+				{mode === 'signup' ? 'Create your knowledge workspace' : 'Sign in to your knowledge workspace'}
+			</p>
 		</div>
 
 		<Card class="p-6">
-			<form onsubmit={(e) => { e.preventDefault(); signIn(); }} class="space-y-4">
+			<form onsubmit={(e) => { e.preventDefault(); submit(); }} class="space-y-4">
+				{#if mode === 'signup'}
+					<div>
+						<label for="name" class="mb-1.5 block text-sm font-medium text-zinc-300">Name</label>
+						<Input id="name" bind:value={name} placeholder="Dr. Jane Doe" />
+					</div>
+				{/if}
 				<div>
 					<label for="email" class="mb-1.5 block text-sm font-medium text-zinc-300">Email</label>
 					<Input id="email" type="email" bind:value={email} placeholder="you@org.com" />
@@ -35,12 +78,21 @@
 					<label for="pw" class="mb-1.5 block text-sm font-medium text-zinc-300">Password</label>
 					<Input id="pw" type="password" bind:value={password} placeholder="••••••••" />
 				</div>
+				{#if errorMsg}
+					<p class="rounded-md border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{errorMsg}</p>
+				{/if}
 				<Button type="submit" class="w-full" disabled={loading}>
 					{#if loading}<Loader2 class="h-4 w-4 animate-spin" />{/if}
-					Sign in
+					{mode === 'signup' ? 'Create account' : 'Sign in'}
 				</Button>
 			</form>
-			<p class="mt-4 text-center text-xs text-zinc-600">Dev mode: authentication is bypassed (seeded admin).</p>
+			<button
+				type="button"
+				onclick={() => { mode = mode === 'signin' ? 'signup' : 'signin'; errorMsg = ''; }}
+				class="mt-4 w-full text-center text-xs text-zinc-500 transition-colors hover:text-zinc-300"
+			>
+				{mode === 'signin' ? 'No account? Create one' : 'Have an account? Sign in'}
+			</button>
 		</Card>
 	</div>
 </div>
