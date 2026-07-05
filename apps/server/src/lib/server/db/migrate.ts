@@ -13,7 +13,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
-const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'migrations');
+// migrate.ts lives at apps/server/src/lib/server/db/ → four levels up to apps/server.
+const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'migrations');
 
 async function main() {
 	const connectionString = process.env.DATABASE_URL;
