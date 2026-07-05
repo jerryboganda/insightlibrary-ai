@@ -1,6 +1,6 @@
 // process.env (not $env/dynamic/private) so this module loads both inside the
 // SvelteKit server AND in the standalone pg-boss worker (jobs/worker.ts).
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { chunkText, embedText } from '../ai/embeddings';
 import { extractText } from '../ingestion/extract';
 import { parseDocument, type ParsedDoc } from '../ingestion/parse';
@@ -8,7 +8,7 @@ import { contextualizeChunks } from '../ingestion/contextualize';
 import { downloadObject } from '../storage/s3';
 import { getDb } from '../db/client';
 import * as schema from '../db/schema';
-import { persistProgress } from './processing-store';
+import { isJobCancelled, persistProgress, setBossJobId } from './processing-store';
 import { extractClaimsForDocument } from '../refinery/extract-claims';
 import { correlateDocument } from '../refinery/correlate';
 
@@ -19,6 +19,16 @@ import { correlateDocument } from '../refinery/correlate';
  * All heavy work runs server-side. Progress is persisted to processing_jobs so
  * it is visible cross-process (worker → API SSE). Runs with real DB writes when
  * DATABASE_URL is set; degrades to a staged simulation otherwise.
+ *
+ * documents.status lifecycle (gap B9): 'processing' while queued/running,
+ * 'indexed' on success (pages refreshed from parse output), 'failed' on error
+ * or user cancellation — the UI renders exactly these values.
+ *
+ * Cancellation (gap B22): POST /api/processing/[id]/cancel flips the
+ * processing_jobs row to stage='failed' and (when still queued) boss.cancel()s
+ * the pg-boss job. A running pipeline re-reads the row at every stage boundary
+ * (and periodically inside the embed loop) and aborts before spending more
+ * tokens.
  */
 
 export interface IngestionJob {
@@ -29,6 +39,14 @@ export interface IngestionJob {
 }
 
 export const INGESTION_QUEUE = 'document-ingestion';
+
+/** Thrown at a cooperative checkpoint when the job was cancelled by the user. */
+export class IngestionCancelledError extends Error {
+	constructor() {
+		super('Ingestion cancelled by user');
+		this.name = 'IngestionCancelledError';
+	}
+}
 
 type ProgressListener = (e: {
 	documentId: string;
@@ -55,6 +73,21 @@ interface MetaChunk {
 	blockId: string | null;
 	context: string | null;
 	embedding: number[] | null;
+}
+
+/** Advance documents.status/status_label (+pages when known). No-op without a DB. */
+async function markDocumentStatus(
+	documentId: string,
+	status: 'processing' | 'indexed' | 'failed',
+	statusLabel: string,
+	pages?: number
+): Promise<void> {
+	const db = getDb();
+	if (!db) return;
+	await db
+		.update(schema.documents)
+		.set({ status, statusLabel, ...(pages && pages > 0 ? { pages } : {}) })
+		.where(eq(schema.documents.id, documentId));
 }
 
 /** Persist parsed pages + blocks (coverage accounting). No-op without a DB. */
@@ -164,12 +197,19 @@ function buildMetaChunks(documentId: string, parsed: ParsedDoc): MetaChunk[] {
 	return out;
 }
 
-/** The stage machine — shared by the inline runner and the pg-boss worker. */
-export async function runIngestion(job: IngestionJob): Promise<void> {
+/** The stage machine — cancellation-aware; throws IngestionCancelledError. */
+async function executePipeline(job: IngestionJob): Promise<void> {
 	const report = async (stage: string, progress: number, message: string) => {
 		const e = { documentId: job.documentId, documentTitle: job.documentTitle, stage, progress, message };
 		emit(e);
 		await persistProgress(e).catch(() => {});
+	};
+
+	// Cooperative cancellation checkpoint: re-read the processing_jobs row and
+	// abort when the cancel endpoint marked it 'failed'.
+	const checkpoint = async () => {
+		const cancelled = await isJobCancelled(job.documentId).catch(() => false);
+		if (cancelled) throw new IngestionCancelledError();
 	};
 
 	// 1. Extract
@@ -182,10 +222,12 @@ export async function runIngestion(job: IngestionJob): Promise<void> {
 	}
 	if (!text) {
 		await report('done', 100, 'Indexed (metadata only — no extractable text)');
+		await markDocumentStatus(job.documentId, 'indexed', 'Indexed (metadata only)').catch(() => {});
 		return;
 	}
 
 	// 2. Parse — structure-aware pages + blocks with coverage accounting.
+	await checkpoint();
 	await report('parse', 28, 'Parsing structure (pages, blocks)');
 	let parsed: ParsedDoc;
 	if (bytes && job.storageKey) {
@@ -200,28 +242,36 @@ export async function runIngestion(job: IngestionJob): Promise<void> {
 	await persistParsed(job.documentId, parsed).catch(() => {});
 
 	// 3. Chunk (page-attributed)
+	await checkpoint();
 	await report('chunk', 45, 'Splitting into semantic chunks');
 	const metaChunks = buildMetaChunks(job.documentId, parsed);
 
 	// 4. Contextualize (Anthropic contextual retrieval — skipped without a provider)
+	await checkpoint();
 	await report('contextualize', 58, 'Adding contextual prefixes');
 	const prefixes = await contextualizeChunks(job.documentTitle, metaChunks.map((c) => c.content));
 	metaChunks.forEach((c, i) => (c.context = prefixes[i]));
 
-	// 5. Embed (context + content)
+	// 5. Embed (context + content) — the longest paid stage, so also check for
+	//    cancellation periodically inside the loop.
+	await checkpoint();
 	await report('embed', 74, `Computing embeddings for ${metaChunks.length} chunks`);
-	for (const c of metaChunks) {
+	for (let i = 0; i < metaChunks.length; i++) {
+		if (i > 0 && i % 25 === 0) await checkpoint();
+		const c = metaChunks[i];
 		const toEmbed = c.context ? `${c.context}\n${c.content}` : c.content;
 		c.embedding = await embedText(toEmbed);
 	}
 
 	// 6. Index (FTS + pgvector)
+	await checkpoint();
 	await report('index', 88, 'Writing FTS + pgvector index');
 	await indexChunks(job.documentId, metaChunks);
 	await markChunkedCoverage(job.documentId).catch(() => {});
 
 	// 7. Extract claims (refinery) — ontology-linked, topic-routed. Skipped
 	//    silently when no provider is configured.
+	await checkpoint();
 	await report('claims', 92, 'Extracting atomic claims');
 	const claimRes = await extractClaimsForDocument(job.documentId).catch((e) => {
 		console.error('[ingest] claim extraction failed:', e instanceof Error ? e.message : e);
@@ -230,6 +280,7 @@ export async function runIngestion(job: IngestionJob): Promise<void> {
 	await markClaimedCoverage(job.documentId).catch(() => {});
 
 	// 8. Correlate — dedup, conflict detection, graph triples, topic versions.
+	await checkpoint();
 	await report('correlate', 97, 'Deduplicating, detecting conflicts, building graph');
 	const corr = await correlateDocument(job.documentId).catch((e) => {
 		console.error('[ingest] correlation failed:', e instanceof Error ? e.message : e);
@@ -242,6 +293,37 @@ export async function runIngestion(job: IngestionJob): Promise<void> {
 		`Indexed ${metaChunks.length} chunks / ${parsed.pages.length} pages · ${claimRes.extracted} claims · ` +
 			`${corr.merged} merged · ${corr.conflicts} conflicts · ${corr.triples} graph edges`
 	);
+	await markDocumentStatus(job.documentId, 'indexed', 'Indexed', parsed.pages.length).catch(
+		() => {}
+	);
+}
+
+/**
+ * Run the pipeline and settle the document's final status. Never throws:
+ * failures mark the document 'failed' (with a persisted failed stage) instead
+ * of bubbling into pg-boss retries that would flip the status back to
+ * 'processing'; cancellations leave the row on 'failed / Cancelled by user'.
+ */
+export async function runIngestion(job: IngestionJob): Promise<void> {
+	try {
+		await executePipeline(job);
+	} catch (e) {
+		if (e instanceof IngestionCancelledError) {
+			console.info(`[ingest] cancelled by user: ${job.documentTitle}`);
+			await markDocumentStatus(job.documentId, 'failed', 'Cancelled').catch(() => {});
+			return;
+		}
+		const message = e instanceof Error ? e.message : String(e);
+		console.error(`[ingest] pipeline failed for ${job.documentTitle}:`, message);
+		await persistProgress({
+			documentId: job.documentId,
+			documentTitle: job.documentTitle,
+			stage: 'failed',
+			progress: 100,
+			message: `Failed: ${message}`
+		}).catch(() => {});
+		await markDocumentStatus(job.documentId, 'failed', 'Processing failed').catch(() => {});
+	}
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -257,6 +339,17 @@ async function getBoss() {
 	return boss;
 }
 
+/**
+ * Best-effort pg-boss cancellation (stops jobs still sitting in the queue; a
+ * job already being worked aborts at its next cooperative checkpoint instead).
+ */
+export async function cancelBossJob(bossJobId: string): Promise<boolean> {
+	const b = await getBoss();
+	if (!b) return false;
+	await b.cancel(INGESTION_QUEUE, bossJobId);
+	return true;
+}
+
 /** Enqueue a document for ingestion (pg-boss when available, inline otherwise). */
 export async function enqueueIngestion(job: IngestionJob): Promise<void> {
 	await persistProgress({
@@ -266,9 +359,12 @@ export async function enqueueIngestion(job: IngestionJob): Promise<void> {
 		progress: 0,
 		message: 'Queued'
 	}).catch(() => {});
+	// Fresh enqueue/retry: the document is honestly 'processing' again.
+	await markDocumentStatus(job.documentId, 'processing', 'Processing (queued)').catch(() => {});
 	const b = await getBoss();
 	if (b) {
-		await b.send(INGESTION_QUEUE, job);
+		const bossJobId: string | null = await b.send(INGESTION_QUEUE, job);
+		if (bossJobId) await setBossJobId(job.documentId, bossJobId).catch(() => {});
 	} else {
 		void runIngestion(job); // fire-and-forget inline in dev
 	}

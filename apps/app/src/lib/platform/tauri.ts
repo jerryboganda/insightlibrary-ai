@@ -6,9 +6,11 @@ import type { PlatformAdapter } from './types';
  * behind Rust commands — never in webview localStorage, which ships in plain
  * text inside the app's data directory.
  *
- * The matching Rust commands (`secrets_get`/`secrets_set`/`secrets_delete`)
- * land with the auth work; calling these before then rejects loudly rather
- * than silently degrading.
+ * Used by the auth flow: `$lib/auth-client` writes the better-auth bearer
+ * session token here on sign-in (key `session_token`) and deletes it on
+ * sign-out; `$lib/api` reads it for the Authorization header. If the matching
+ * Rust commands (`secrets_get`/`secrets_set`/`secrets_delete`) are missing,
+ * these calls reject loudly rather than silently degrading.
  */
 export const tauriPlatform: PlatformAdapter = {
 	name: 'tauri',

@@ -19,7 +19,14 @@ async function main() {
 	await boss.work<IngestionJob>(INGESTION_QUEUE, async (jobs: Array<{ data: IngestionJob }>) => {
 		for (const job of jobs) {
 			console.info(`[worker] ingesting ${job.data.documentTitle}`);
-			await runIngestion(job.data);
+			// runIngestion settles the document's final status ('indexed'/'failed')
+			// itself and honors user cancellation via cooperative checkpoints; the
+			// guard here only keeps an unexpected throw from failing sibling jobs.
+			try {
+				await runIngestion(job.data);
+			} catch (e) {
+				console.error(`[worker] unexpected error for ${job.data.documentTitle}:`, e);
+			}
 		}
 	});
 	console.info('[worker] listening on', INGESTION_QUEUE);

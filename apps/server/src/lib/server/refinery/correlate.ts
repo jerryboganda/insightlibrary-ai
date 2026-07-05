@@ -6,7 +6,7 @@
 import { and, eq } from 'drizzle-orm';
 import { getDb } from '../db/client';
 import { claims } from '../db/schema';
-import { REFINERY_CONFIG } from './config';
+import { getRefineryConfig } from './config';
 import { dedupClaim } from './dedup';
 import { detectConflictsForClaim } from './conflict';
 import { extractTriplesForDocument } from './extract-triples';
@@ -18,6 +18,8 @@ export async function correlateDocument(
 ): Promise<{ merged: number; conflicts: number; triples: number; versioned: number }> {
 	const db = getDb();
 	if (!db) return { merged: 0, conflicts: 0, triples: 0, versioned: 0 };
+	// Live org-scoped cost guard (admin Governance page), env default otherwise.
+	const cfg = await getRefineryConfig(orgId);
 
 	const rows = await db
 		.select()
@@ -28,7 +30,7 @@ export async function correlateDocument(
 	let conflicts = 0;
 	const topicsTouched = new Set<string>();
 
-	for (const c of rows.slice(0, REFINERY_CONFIG.maxCorrelateClaims)) {
+	for (const c of rows.slice(0, cfg.maxCorrelateClaims)) {
 		if (c.topicId) topicsTouched.add(c.topicId);
 		if (c.status !== 'active') continue;
 		const d = await dedupClaim(c.id, orgId).catch(() => ({ merged: false }));

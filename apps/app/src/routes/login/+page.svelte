@@ -4,6 +4,7 @@
 	import { Button, Input, Card } from '$lib/components/ui';
 	import { authClient } from '$lib/auth-client';
 	import { api } from '$lib/api';
+	import { ApiError } from '@insightlibrary/api-client';
 
 	let mode = $state<'signin' | 'signup'>('signin');
 	let name = $state('');
@@ -16,13 +17,24 @@
 		loading = true;
 		errorMsg = '';
 		try {
-			// Detect whether the server has auth enabled (production DB) or is in
-			// dev-bypass mode; in bypass mode any credentials just enter.
-			const session = await api.session();
-			const authActive = !session.authenticated || session.user === null;
-
-			if (!authActive) {
-				goto('/');
+			// Probe the server first. Dev-bypass mode reports an authenticated seeded
+			// session (or 501s on auth-only endpoints) — only then is "just enter"
+			// safe. Any other probe failure is a real error and must be shown, never
+			// silently redirected into a broken anonymous session.
+			try {
+				const session = await api.session();
+				if (session.authenticated && session.user !== null) {
+					// Dev bypass, or an already-active session — nothing to sign in.
+					goto('/');
+					return;
+				}
+			} catch (e) {
+				if (e instanceof ApiError && e.status === 501) {
+					// Explicit dev-bypass signal.
+					goto('/');
+					return;
+				}
+				errorMsg = 'Could not reach the server. Check your connection and try again.';
 				return;
 			}
 
@@ -32,18 +44,22 @@
 					: await authClient.signIn.email({ email, password });
 
 			if (res.error) {
-				// In dev-bypass the auth endpoints 501; treat that as "just enter".
+				// Dev-bypass servers 501 the auth endpoints; treat that as "just enter".
 				if (res.error.status === 501) {
 					goto('/');
 					return;
 				}
-				errorMsg = res.error.message ?? 'Authentication failed';
+				errorMsg =
+					res.error.message ??
+					(mode === 'signup' ? 'Could not create the account.' : 'Invalid email or password.');
 				return;
 			}
+
+			// Success only. On desktop the auth client has already stored the bearer
+			// session token in the OS keyring (see $lib/auth-client fetchOptions).
 			goto('/');
 		} catch {
-			// Network/dev fallback — let the user in (dev bypass serves seeded data).
-			goto('/');
+			errorMsg = 'Network error — could not reach the authentication server. Please try again.';
 		} finally {
 			loading = false;
 		}

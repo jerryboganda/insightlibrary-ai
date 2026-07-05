@@ -19,16 +19,6 @@
 	});
 	const webhooks = $derived($webhooksQuery.data ?? []);
 
-	let copiedId = $state<string | null>(null);
-
-	function handleCopy(id: string, value: string) {
-		navigator.clipboard.writeText(value);
-		copiedId = id;
-		setTimeout(() => {
-			if (copiedId === id) copiedId = null;
-		}, 2000);
-	}
-
 	// ── Create API key ────────────────────────────────────────────────────────────
 	// The full token is only returned once, so surface it in a one-time notice box.
 	let newKeyName = $state('');
@@ -174,6 +164,14 @@
 							{/if}
 						</button>
 					</div>
+					<p class="mt-3 text-xs text-zinc-500">
+						Send it as a bearer token on every API request, for example:
+					</p>
+					<code
+						class="mt-1.5 block truncate rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 font-mono text-[11px] text-zinc-400"
+					>
+						curl -H "Authorization: Bearer {revealedToken}" https://&lt;your-server&gt;/api/topics
+					</code>
 				</div>
 				<button
 					onclick={() => (revealedToken = null)}
@@ -190,6 +188,14 @@
 	<section class="glass-panel overflow-hidden rounded-xl border border-zinc-800">
 		<div class="border-b border-zinc-800 bg-zinc-900/30 p-6">
 			<h2 class="text-lg font-semibold text-zinc-100">Active API Keys</h2>
+			<p class="mt-1 text-xs text-zinc-500">
+				Authenticate requests with the
+				<code class="rounded bg-zinc-900 px-1 py-0.5 font-mono text-zinc-400"
+					>Authorization: Bearer sk_live_…</code
+				>
+				header. The full secret is shown only once, at creation — the masked hint below cannot be
+				used to authenticate.
+			</p>
 		</div>
 		<div class="overflow-x-auto">
 			<table class="w-full text-left text-sm whitespace-nowrap">
@@ -224,19 +230,8 @@
 							<tr class="transition-colors hover:bg-zinc-900/30">
 								<td class="px-6 py-4 font-medium text-zinc-200">{key.name}</td>
 								<td class="px-6 py-4">
-									<span class="flex items-center gap-2 font-mono text-zinc-500">
-										{key.tokenHint}
-										<button
-											onclick={() => handleCopy(key.id, key.tokenHint)}
-											class="text-zinc-500 transition-colors hover:text-zinc-300"
-											aria-label="Copy API key"
-										>
-											{#if copiedId === key.id}
-												<Check class="h-3.5 w-3.5 text-emerald-400" />
-											{:else}
-												<Copy class="h-3.5 w-3.5" />
-											{/if}
-										</button>
+									<span class="font-mono text-zinc-500" title="Masked hint — the full secret was shown once at creation">
+										sk_live_{key.tokenHint}
 									</span>
 								</td>
 								<td class="px-6 py-4">{key.createdAt}</td>

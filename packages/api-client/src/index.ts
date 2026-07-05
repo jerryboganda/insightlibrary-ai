@@ -49,6 +49,49 @@ export class ApiError extends Error {
 
 type ListEnvelope<T> = { items: T[]; total: number };
 
+/** Effective org-level configuration values (env defaults overlaid with stored overrides). */
+export interface OrgSettingsValues {
+	strictCitationDefault: boolean;
+	autoSsotTopics: boolean;
+	requireReview: boolean;
+	autoMergeConfidence: number;
+	dedupCosine: number;
+	dedupUseNli: boolean;
+	conflictSubjectCosine: number;
+	conflictEnabled: boolean;
+	maxCorrelateClaims: number;
+	parseMode: 'heuristic' | 'document-ai' | 'external';
+	parseAiMaxPages: number;
+	claimsMaxChunks: number;
+	contextualMaxChunks: number;
+	ontologyLinkMaxDistance: number;
+	rerank: 'off' | 'llm' | 'cohere' | 'jina';
+	searchRrfK: number;
+	searchCandidates: number;
+	searchTopK: number;
+	searchSnippetLength: number;
+	copilotPromptOverrides: Record<string, string>;
+	sourcePriorityOrder: string[];
+}
+
+/** GET/PUT /api/org/settings response. */
+export interface OrgSettingsResponse {
+	name: string | null;
+	logo: string | null;
+	settings: OrgSettingsValues;
+	defaults: OrgSettingsValues;
+	overridden: string[];
+	copilotPromptDefaults: Record<string, string>;
+	updatedAt: string | null;
+}
+
+/** PUT /api/org/settings body — a merge patch; null clears a key to its env default. */
+export interface OrgSettingsUpdate {
+	name?: string;
+	logo?: string | null;
+	settings?: { [K in keyof OrgSettingsValues]?: OrgSettingsValues[K] | null };
+}
+
 export class ApiClient {
 	constructor(private readonly options: ApiClientOptions) {}
 
@@ -244,6 +287,11 @@ export class ApiClient {
 		);
 	billingCheckout = () => this.request<{ url: string }>('/api/billing/checkout', { method: 'POST' });
 	billingPortal = () => this.request<{ url: string }>('/api/billing/portal', { method: 'POST' });
+
+	// Org settings (workspace identity + governance/pipeline/search configuration)
+	getOrgSettings = () => this.request<OrgSettingsResponse>('/api/org/settings');
+	updateOrgSettings = (input: OrgSettingsUpdate) =>
+		this.request<OrgSettingsResponse>('/api/org/settings', { method: 'PUT', body: JSON.stringify(input) });
 
 	// Admin
 	getUsage = () => this.request<UsageMetrics>('/api/usage');

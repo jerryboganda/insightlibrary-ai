@@ -1,15 +1,18 @@
 import type { CopilotMode } from '@insightlibrary/schemas';
 import { getRouter, type ChatMessage, type RouteContext } from './providers';
+import { getOrgSettings } from '../org-settings';
 
 /**
- * Copilot streaming — now provider-agnostic. Builds the mode system prompt and
+ * Copilot streaming — now provider-agnostic. Builds the mode system prompt
+ * (admin-overridable per mode via org settings → copilotPromptOverrides) and
  * streams through the multi-provider router (Gemini / Claude / OpenAI / Kimi /
  * DeepSeek / MiniMax / OpenAI-compatible). When no provider key is configured a
  * deterministic mock stream is used so the copilot works with zero external
  * services (unchanged behavior). Kept at this path so /api/copilot is untouched.
  */
 
-const MODE_SYSTEM_PROMPTS: Record<CopilotMode, string> = {
+/** Built-in per-mode system prompts (defaults; org settings can override). */
+export const MODE_SYSTEM_PROMPTS: Record<CopilotMode, string> = {
 	ask: 'Answer helpfully and concisely.',
 	strict_citation:
 		'Answer ONLY from provided sources. Every claim must carry an inline citation like [bk-A p12]. If unsupported, say so.',
@@ -32,11 +35,15 @@ export interface CopilotStreamInput {
 	context?: string;
 	/** Optional per-request credential (stored key / forwarded OAuth token). */
 	ctx?: RouteContext;
+	/** Org whose settings supply prompt overrides (defaults to org_1). */
+	orgId?: string;
 }
 
 /** Async generator of response text chunks. Real provider stream or mock. */
 export async function* streamCopilot(input: CopilotStreamInput): AsyncGenerator<string, void, unknown> {
-	const system = MODE_SYSTEM_PROMPTS[input.mode];
+	// Admin-managed per-mode prompt override (org settings), built-in otherwise.
+	const overrides = (await getOrgSettings(input.orgId ?? 'org_1').catch(() => null))?.copilotPromptOverrides;
+	const system = overrides?.[input.mode]?.trim() || MODE_SYSTEM_PROMPTS[input.mode];
 	const router = getRouter();
 
 	if (!router.available('chat', input.ctx)) {

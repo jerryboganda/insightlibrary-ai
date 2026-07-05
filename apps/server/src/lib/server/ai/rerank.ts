@@ -6,15 +6,19 @@
  */
 import { getRouter } from './providers';
 import { REFINERY_CONFIG } from '../refinery/config';
+import { getOrgSettings } from '../org-settings';
 
 export interface RerankItem {
 	id: string;
 	text: string;
 }
 
-export async function rerankResults(query: string, items: RerankItem[]): Promise<Map<string, number>> {
-	const mode = REFINERY_CONFIG.rerank;
-	if (mode === 'off' || items.length === 0) return new Map();
+export async function rerankResults(query: string, items: RerankItem[], orgId = 'org_1'): Promise<Map<string, number>> {
+	if (items.length === 0) return new Map();
+	// Backend selected via org settings (admin-manageable), env RERANK default.
+	// Cohere/Jina additionally require their vendor keys in the server env.
+	const mode = (await getOrgSettings(orgId).catch(() => null))?.rerank ?? REFINERY_CONFIG.rerank;
+	if (mode === 'off') return new Map();
 	try {
 		if (mode === 'cohere') return await cohereRerank(query, items);
 		if (mode === 'jina') return await jinaRerank(query, items);

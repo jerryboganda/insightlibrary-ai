@@ -1,38 +1,56 @@
 <script lang="ts">
-	import { HardDrive, Database, Network, RefreshCw } from '@lucide/svelte';
-	import { fly } from 'svelte/transition';
+	import { HardDrive, Database, Network, RefreshCw, AlertTriangle, X } from '@lucide/svelte';
+	import { fade, fly, scale } from 'svelte/transition';
 	import { createMutation, useQueryClient } from '@tanstack/svelte-query';
 	import { api } from '$lib/api';
 
 	const queryClient = useQueryClient();
 
-	// Short-lived notices shown next to each tool after it runs.
+	// Re-embedding is a paid AI operation — gate it behind an explicit
+	// confirmation so a stray click never spends tokens.
+	let confirmOpen = $state(false);
+
+	// Short-lived notices shown next to the tool after it runs.
 	let rebuildNotice = $state('');
-	let cacheNotice = $state('');
+	let rebuildProgress = $state('');
 
-	// Rebuild the vector index (re-embeds all chunks). Reports the reembedded count.
+	// Re-embed the vector index. The endpoint processes up to 500 chunks per
+	// call, so loop until the server reports nothing remaining instead of
+	// asking the admin to keep re-clicking.
 	const rebuild = createMutation({
-		mutationFn: () => api.reindex(),
-		onSuccess: (res) => {
-			rebuildNotice = `Re-embedded ${res.reembedded} chunk${res.reembedded === 1 ? '' : 's'}.${res.remaining ? ' More remaining — run again.' : ''}`;
+		mutationFn: async () => {
+			let total = 0;
+			let batches = 0;
+			for (;;) {
+				const res = await api.reindex();
+				total += res.reembedded;
+				batches += 1;
+				rebuildProgress = `Re-embedded ${total} chunk${total === 1 ? '' : 's'} so far (batch ${batches})…`;
+				if (!res.remaining) break;
+				// Safety valve: a batch reporting progress-less "remaining" would
+				// otherwise loop (and bill) forever.
+				if (res.reembedded === 0) break;
+			}
+			return total;
+		},
+		onSuccess: (total) => {
+			rebuildProgress = '';
+			rebuildNotice = `Done — re-embedded ${total} chunk${total === 1 ? '' : 's'}.`;
 			queryClient.invalidateQueries({ queryKey: ['usage'] });
 		},
 		onError: () => {
-			rebuildNotice = 'Rebuild failed. Please try again.';
+			rebuildProgress = '';
+			rebuildNotice =
+				'Re-embedding failed part-way. Chunks already processed are kept — run again to continue.';
+			queryClient.invalidateQueries({ queryKey: ['usage'] });
 		}
 	});
 
-	// Clearing the semantic cache rebuilds indexes so agents re-fetch fresh context.
-	const clearCache = createMutation({
-		mutationFn: () => api.reindex(),
-		onSuccess: () => {
-			cacheNotice = 'Cache cleared.';
-			queryClient.invalidateQueries({ queryKey: ['usage'] });
-		},
-		onError: () => {
-			cacheNotice = 'Could not clear cache. Please try again.';
-		}
-	});
+	function startRebuild() {
+		confirmOpen = false;
+		rebuildNotice = '';
+		$rebuild.mutate();
+	}
 
 	// Inline storage figures — no capacity endpoint yet (prototype spec).
 	const stores = [
@@ -114,7 +132,7 @@
 		<div class="border-b border-zinc-800 bg-zinc-900/30 p-6">
 			<h2 class="text-lg font-semibold text-zinc-100">Index Management Tools</h2>
 			<p class="mt-1 text-sm text-zinc-400">
-				Run these tools if search results are stale or if you have modified the global extraction
+				Run this if search results are stale or if you have modified the global extraction
 				ontology.
 			</p>
 		</div>
@@ -123,46 +141,71 @@
 				class="flex flex-col justify-between gap-4 rounded-lg border border-zinc-800 bg-zinc-900/30 p-4 sm:flex-row sm:items-center"
 			>
 				<div>
-					<h4 class="text-sm font-medium text-zinc-200">Rebuild Vector Index</h4>
+					<h4 class="text-sm font-medium text-zinc-200">Re-embed Vector Index</h4>
 					<p class="mt-1 text-xs text-zinc-500">
-						Re-embeds all extracted chunks using the latest BGE-M3 embedding models. This process will
-						incur token costs.
+						Re-embeds every extracted chunk with the configured embedding provider. Runs in
+						batches and <span class="font-medium text-amber-400">incurs AI token costs</span>.
 					</p>
-					{#if rebuildNotice}
+					{#if rebuildProgress}
+						<p class="mt-2 text-xs text-zinc-400" role="status">{rebuildProgress}</p>
+					{:else if rebuildNotice}
 						<p class="mt-2 text-xs text-emerald-400" role="status">{rebuildNotice}</p>
 					{/if}
 				</div>
 				<button
-					onclick={() => $rebuild.mutate()}
+					onclick={() => (confirmOpen = true)}
 					disabled={$rebuild.isPending}
 					class="flex shrink-0 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium whitespace-nowrap text-zinc-300 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
 				>
 					<RefreshCw class="h-4 w-4 {$rebuild.isPending ? 'animate-spin' : ''}" />
-					{$rebuild.isPending ? 'Rebuilding…' : 'Start Rebuild'}
-				</button>
-			</div>
-
-			<div
-				class="flex flex-col justify-between gap-4 rounded-lg border border-zinc-800 bg-zinc-900/30 p-4 sm:flex-row sm:items-center"
-			>
-				<div>
-					<h4 class="text-sm font-medium text-zinc-200">Clear Semantic Cache</h4>
-					<p class="mt-1 text-xs text-zinc-500">
-						Forces Copilot SDK and orchestrator agents to re-fetch context instead of using cached
-						SSOT responses.
-					</p>
-					{#if cacheNotice}
-						<p class="mt-2 text-xs text-emerald-400" role="status">{cacheNotice}</p>
-					{/if}
-				</div>
-				<button
-					onclick={() => $clearCache.mutate()}
-					disabled={$clearCache.isPending}
-					class="flex shrink-0 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium whitespace-nowrap text-zinc-300 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
-				>
-					{$clearCache.isPending ? 'Clearing…' : 'Clear Cache'}
+					{$rebuild.isPending ? 'Re-embedding…' : 'Start Re-embed'}
 				</button>
 			</div>
 		</div>
 	</section>
 </div>
+
+{#if confirmOpen}
+	<div
+		transition:fade={{ duration: 150 }}
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+	>
+		<div
+			transition:scale={{ duration: 150, start: 0.95 }}
+			class="flex w-full max-w-md flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+		>
+			<div class="flex items-center justify-between border-b border-zinc-800 bg-zinc-900/50 p-4">
+				<h2 class="flex items-center gap-2 text-lg font-semibold text-zinc-100">
+					<AlertTriangle class="h-5 w-5 text-amber-400" /> Re-embed all chunks?
+				</h2>
+				<button onclick={() => (confirmOpen = false)} class="text-zinc-500 hover:text-zinc-300">
+					<X class="h-5 w-5" />
+				</button>
+			</div>
+			<div class="space-y-3 p-5 text-sm text-zinc-300">
+				<p>
+					This regenerates the embedding for <span class="font-medium text-zinc-100">every
+					extracted chunk</span> in your library using your configured AI embedding provider.
+				</p>
+				<p class="rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+					This is a paid operation: each chunk is sent to the embedding API and billed as token
+					usage. Large libraries may take several minutes and cost accordingly.
+				</p>
+			</div>
+			<div class="flex justify-end gap-3 border-t border-zinc-800 bg-zinc-900/30 p-4 py-3">
+				<button
+					onclick={() => (confirmOpen = false)}
+					class="px-4 py-2 text-sm font-medium text-zinc-400 hover:text-zinc-200"
+				>
+					Cancel
+				</button>
+				<button
+					onclick={startRebuild}
+					class="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-amber-500"
+				>
+					Re-embed Now
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}

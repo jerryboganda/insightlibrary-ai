@@ -1,16 +1,7 @@
 <script lang="ts">
 	import { createQuery } from '@tanstack/svelte-query';
-	import { goto } from '$app/navigation';
 	import { fade } from 'svelte/transition';
-	import {
-		Brain,
-		Layers,
-		Compass,
-		Play,
-		ArrowRight,
-		Sparkles,
-		BookOpen
-	} from '@lucide/svelte';
+	import { Brain, Layers, Sparkles, BookOpen } from '@lucide/svelte';
 	import { api } from '$lib/api';
 	import { Skeleton } from '$lib/components/ui';
 	import { cn, healthBg } from '$lib/utils';
@@ -19,14 +10,36 @@
 	// Real API: study-able topics become the deck cards below.
 	const topics = createQuery({ queryKey: ['topics'], queryFn: () => api.listTopics() });
 
-	// Header stats. Derived from real topic data where possible, with sensible
-	// fallbacks so the hero never renders blank.
-	const cardsDue = $derived.by(() =>
-		($topics.data ?? []).reduce((sum, t) => sum + (t.updates ?? 0), 0)
-	);
+	// All flashcards across decks — the scheduler fields (dueAt/state) drive the
+	// real due/new counts in the hero and the per-deck badges.
+	const allCards = createQuery({
+		queryKey: ['flashcards', 'all'],
+		queryFn: () => api.listFlashcards()
+	});
+
+	// Real spaced-repetition counts. A card is "new" until first reviewed and
+	// "due" when its scheduled dueAt has passed.
+	const cardStats = $derived.by(() => {
+		const cards = $allCards.data ?? [];
+		const now = Date.now();
+		let due = 0;
+		let fresh = 0;
+		const perTopic = new Map<string, number>();
+		for (const c of cards) {
+			const isNew = (c.state ?? 'new') === 'new';
+			const isDue = !isNew && !!c.dueAt && Date.parse(c.dueAt) <= now;
+			if (isNew) fresh += 1;
+			if (isNew || isDue) perTopic.set(c.topicId, (perTopic.get(c.topicId) ?? 0) + 1);
+			if (isDue) due += 1;
+		}
+		return { due, fresh, perTopic };
+	});
+
+	// Average topic health across the registry; null (rendered as —) when there
+	// are no topics rather than a made-up number.
 	const topicMastery = $derived.by(() => {
 		const list = $topics.data ?? [];
-		if (!list.length) return 87;
+		if (!list.length) return null;
 		return Math.round(list.reduce((sum, t) => sum + t.health, 0) / list.length);
 	});
 
@@ -47,36 +60,6 @@
 		})
 	);
 	const previewCards = $derived(($cards.data ?? []).slice(0, 3));
-
-	// Recommended learning paths are curated groupings that have no dedicated API
-	// endpoint — inlined here to match the prototype's static content.
-	const learningPaths = [
-		{
-			id: 'endocrinology-core',
-			title: 'Endocrinology Core',
-			description:
-				"Master Addison's, Cushing's, and Hypothyroidism based on updated Board Pearls and Clinical guidelines.",
-			badge: 'SSOT Verified',
-			badgeTone: 'indigo' as const,
-			topicCount: 3,
-			cta: 'Start Path'
-		},
-		{
-			id: 'radiology-findings',
-			title: 'Radiology Findings',
-			description: 'Review 45 new imaging flags extracted from Book C: Rad Core this week.',
-			badge: 'New Content',
-			badgeTone: 'emerald' as const,
-			topicCount: 12,
-			cta: 'Resume'
-		}
-	];
-
-	// Learning paths have no dedicated API route; navigate into the study flow for
-	// the path (preferring an explicit action route if one is ever provided).
-	function openPath(path: { id?: string; action?: string }) {
-		goto(path.action ?? (path.id ? `/study/${path.id}` : '/study'));
-	}
 </script>
 
 <div class="flex flex-col">
@@ -105,81 +88,33 @@
 					{#if $topics.isLoading}
 						<Skeleton class="mx-auto mb-1 h-8 w-16" />
 					{:else}
-						<p class="mb-1 text-3xl font-bold text-white">{topicMastery}%</p>
+						<p class="mb-1 text-3xl font-bold text-white">
+							{topicMastery === null ? '—' : `${topicMastery}%`}
+						</p>
 					{/if}
 					<p class="text-xs font-medium text-indigo-300">Topic Mastery</p>
 				</div>
 				<div class="min-w-[120px] rounded-xl border border-indigo-500/20 bg-zinc-950/50 p-4">
-					{#if $topics.isLoading}
+					{#if $allCards.isLoading}
 						<Skeleton class="mx-auto mb-1 h-8 w-10" />
 					{:else}
-						<p class="mb-1 text-3xl font-bold text-white">{cardsDue}</p>
+						<p class="mb-1 text-3xl font-bold text-white">{cardStats.due}</p>
 					{/if}
 					<p class="text-xs font-medium text-indigo-300">Cards Due</p>
+				</div>
+				<div class="min-w-[120px] rounded-xl border border-indigo-500/20 bg-zinc-950/50 p-4">
+					{#if $allCards.isLoading}
+						<Skeleton class="mx-auto mb-1 h-8 w-10" />
+					{:else}
+						<p class="mb-1 text-3xl font-bold text-white">{cardStats.fresh}</p>
+					{/if}
+					<p class="text-xs font-medium text-indigo-300">New Cards</p>
 				</div>
 			</div>
 		</div>
 	</div>
 
 	<div class="mx-auto w-full max-w-6xl space-y-10 py-8">
-		<!-- Learning Paths -->
-		<section>
-			<h2 class="mb-4 flex items-center gap-2 text-lg font-semibold text-zinc-100">
-				<Compass class="h-5 w-5 text-indigo-400" /> Recommended Learning Paths
-			</h2>
-			<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-				{#each learningPaths as path (path.id)}
-					<div
-						class="glass-panel group rounded-xl border border-zinc-800 p-5 transition-colors hover:border-indigo-500/30"
-					>
-						<div class="mb-2 flex items-start justify-between gap-3">
-							<h3 class="text-lg font-semibold text-zinc-100">{path.title}</h3>
-							<span
-								class={cn(
-									'rounded-full border px-2 py-0.5 text-xs font-medium whitespace-nowrap',
-									path.badgeTone === 'indigo'
-										? 'border-indigo-500/20 bg-indigo-500/10 text-indigo-400'
-										: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
-								)}
-							>
-								{path.badge}
-							</span>
-						</div>
-						<p class="mb-6 line-clamp-2 text-sm text-zinc-400">{path.description}</p>
-						<div class="flex items-center justify-between">
-							{#if path.cta === 'Start Path'}
-								<div class="flex -space-x-2">
-									{#each Array(3) as _, i (i)}
-										<div
-											class="flex h-8 w-8 items-center justify-center rounded-full border-2 border-zinc-950 bg-zinc-800 text-[10px] text-zinc-400"
-										>
-											<Layers class="h-3.5 w-3.5" />
-										</div>
-									{/each}
-								</div>
-								<button
-									onclick={() => openPath(path)}
-									class="flex items-center gap-2 rounded-md bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 transition-colors hover:bg-zinc-200"
-								>
-									<Play class="h-4 w-4 fill-zinc-900" /> {path.cta}
-								</button>
-							{:else}
-								<div class="text-sm text-zinc-500">
-									<span class="font-medium text-zinc-300">{path.topicCount}</span> topics
-								</div>
-								<button
-									onclick={() => openPath(path)}
-									class="flex items-center gap-2 rounded-md border border-zinc-700 bg-transparent px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-800"
-								>
-									{path.cta} <ArrowRight class="h-4 w-4" />
-								</button>
-							{/if}
-						</div>
-					</div>
-				{/each}
-			</div>
-		</section>
-
 		<!-- Study-able Topics (real API) -->
 		<section>
 			<div class="mb-4 flex items-center justify-between">
@@ -223,6 +158,7 @@
 			{:else}
 				<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
 					{#each $topics.data ?? [] as topic (topic.id)}
+						{@const deckDue = cardStats.perTopic.get(topic.id) ?? 0}
 						<a
 							href="/study/{topic.id}"
 							in:fade={{ duration: 150 }}
@@ -232,11 +168,11 @@
 								<span class="font-mono text-[10px] tracking-wider text-zinc-500 uppercase">
 									{topic.folder}
 								</span>
-								{#if topic.updates > 0}
+								{#if deckDue > 0}
 									<span
 										class="rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 text-[10px] font-medium text-rose-400"
 									>
-										{topic.updates} due
+										{deckDue} due
 									</span>
 								{/if}
 							</div>
@@ -250,7 +186,7 @@
 							</p>
 							<div class="mt-auto space-y-2">
 								<div class="flex items-center justify-between text-xs">
-									<span class="text-zinc-500">Mastery</span>
+									<span class="text-zinc-500">Topic Health</span>
 									<span class="font-mono text-zinc-400">{topic.health}%</span>
 								</div>
 								<div class="h-1.5 w-full rounded-full border border-zinc-800 bg-zinc-900">

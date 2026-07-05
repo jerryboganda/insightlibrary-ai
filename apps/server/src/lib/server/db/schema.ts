@@ -45,6 +45,24 @@ export const users = pgTable('users', {
 	lastActiveAt: timestamp('last_active_at').notNull().defaultNow()
 });
 
+/**
+ * Per-org admin-managed settings: workspace identity (name/logo) plus a JSONB
+ * key-value overlay of runtime configuration (governance/refinery thresholds,
+ * ingestion pipeline knobs, search/generation constants). Keys absent from
+ * `settings` fall back to env-var defaults — see lib/server/org-settings.ts,
+ * the single reader/writer (short-TTL cached, worker-safe).
+ */
+export const orgSettings = pgTable('org_settings', {
+	orgId: text('org_id')
+		.primaryKey()
+		.references(() => organizations.id),
+	name: text('name'),
+	/** Small data: URL today; an object-storage key once a logo asset flow exists. */
+	logoKey: text('logo_key'),
+	settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
+	updatedAt: timestamp('updated_at').notNull().defaultNow()
+});
+
 // ── Library ─────────────────────────────────────────────────────────────────
 export const folders = pgTable('folders', {
 	id: text('id').primaryKey(),

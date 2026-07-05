@@ -29,6 +29,7 @@ import { embedText } from '../ai/embeddings';
 import { rerankResults } from '../ai/rerank';
 import { expandQuery } from '../ai/expansion';
 import { computeCoverage } from './coverage';
+import { getOrgSettings } from '../org-settings';
 
 /**
  * Postgres/Drizzle implementation of the Repository contract. Activated when
@@ -268,8 +269,13 @@ export class PostgresRepository implements Repository {
 		// Self-sufficient FTS: ensure the generated tsvector column + GIN index
 		// exist even if the DB was created by db:push without running db:seed.
 		await this.ensureFts();
+		// Admin-tunable retrieval constants (org settings; env/hardcoded defaults).
+		const cfg = await getOrgSettings(this.orgId).catch(() => null);
+		const K = cfg?.searchRrfK ?? 60;
+		const armLimit = cfg?.searchCandidates ?? 30;
+		const topK = cfg?.searchTopK ?? 20;
+		const snippetLen = cfg?.searchSnippetLength ?? 240;
 		const qvec = await embedText(q);
-		const K = 60;
 		const fused = new Map<string, { score: number; documentId: string; content: string; title: string; folderId: string }>();
 
 		// FTS arm.
@@ -289,7 +295,7 @@ export class PostgresRepository implements Repository {
 			FROM chunks c JOIN documents d ON d.id = c.document_id
 			WHERE (setweight(to_tsvector('english', coalesce(c.context, '')), 'A') ||
 			       setweight(to_tsvector('english', c.content), 'B')) @@ plainto_tsquery('english', ${q})
-			LIMIT 30
+			LIMIT ${armLimit}
 		`);
 		for (const r of fts.rows) {
 			const prev = fused.get(r.id);
@@ -321,7 +327,7 @@ export class PostgresRepository implements Repository {
 				FROM chunks c JOIN documents d ON d.id = c.document_id
 				WHERE c.embedding IS NOT NULL
 				ORDER BY c.embedding <=> ${literal}::vector
-				LIMIT 30
+				LIMIT ${armLimit}
 			`);
 			for (const r of vec.rows) {
 				const prev = fused.get(r.id);
@@ -336,11 +342,11 @@ export class PostgresRepository implements Repository {
 			}
 		}
 
-		// Optional rerank hop over the top fused candidates (config: RERANK; off by
-		// default → identical behavior). Blends the rerank score onto the RRF score.
+		// Optional rerank hop over the top fused candidates (org setting: rerank;
+		// off by default → identical behavior). Blends the rerank score onto RRF.
 		let entries = [...fused.entries()].sort((a, b) => b[1].score - a[1].score);
-		const topN = entries.slice(0, 30);
-		const reranked = await rerankResults(q, topN.map(([id, v]) => ({ id, text: v.content }))).catch(
+		const topN = entries.slice(0, armLimit);
+		const reranked = await rerankResults(q, topN.map(([id, v]) => ({ id, text: v.content })), this.orgId).catch(
 			() => new Map<string, number>()
 		);
 		if (reranked.size) {
@@ -349,14 +355,14 @@ export class PostgresRepository implements Repository {
 				if (rs !== undefined) v.score += rs;
 			}
 			topN.sort((a, b) => b[1].score - a[1].score);
-			entries = [...topN, ...entries.slice(30)];
+			entries = [...topN, ...entries.slice(armLimit)];
 		}
 
-		const results: SearchResult[] = entries.slice(0, 20).map(([id, v]) => ({
+		const results: SearchResult[] = entries.slice(0, topK).map(([id, v]) => ({
 			kind: 'chunk' as const,
 			id,
 			title: v.title,
-			snippet: v.content.slice(0, 240),
+			snippet: v.content.slice(0, snippetLen),
 			href: `/folders/${v.folderId}/${v.documentId}`,
 			score: v.score
 		}));
