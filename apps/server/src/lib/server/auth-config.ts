@@ -1,6 +1,8 @@
 import { betterAuth } from 'better-auth';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { admin, bearer, organization } from 'better-auth/plugins';
+import { createAccessControl } from 'better-auth/plugins/access';
+import { adminAc, defaultStatements } from 'better-auth/plugins/admin/access';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { getDb, type Db } from './db/client';
 import * as schema from './db/schema';
@@ -34,6 +36,21 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** The only roles the platform supports (users.role, RBAC guard, admin console). */
 export const APP_ROLES = ['owner', 'admin', 'editor', 'viewer'] as const;
 export type AppRole = (typeof APP_ROLES)[number];
+
+/**
+ * Access-control roles for the better-auth admin plugin. The plugin rejects any
+ * `adminRoles`/`defaultRole` name that isn't defined here (that mismatch is what
+ * crashed the server at boot). owner+admin get the full admin statement set;
+ * editor/viewer are ordinary users (app-level RBAC is enforced separately by
+ * auth-guard.ts against the session role, not by this plugin).
+ */
+const appAc = createAccessControl({ ...defaultStatements });
+const appRoles = {
+	owner: appAc.newRole({ ...adminAc.statements }),
+	admin: appAc.newRole({ ...adminAc.statements }),
+	editor: appAc.newRole({}),
+	viewer: appAc.newRole({})
+};
 
 /** Map any better-auth role value (unset, 'user', or a CSV list) to an app role. */
 export function normalizeAppRole(role: string | null | undefined): AppRole {
@@ -388,7 +405,7 @@ function build() {
 			}),
 			// 'owner' outranks 'admin' in the app RBAC — both may use admin endpoints
 			// (set-user-password, revoke-user-sessions…). New users default to viewer.
-			admin({ defaultRole: 'viewer', adminRoles: ['admin', 'owner'] }),
+			admin({ ac: appAc, roles: appRoles, defaultRole: 'viewer', adminRoles: ['admin', 'owner'] }),
 			bearer()
 		]
 	});
