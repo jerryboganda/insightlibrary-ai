@@ -9,18 +9,26 @@
  *    i.e. the outcome of Correlation's dedup (its thresholds live in refinery/config.ts;
  *    this harness measures the already-merged result, so no threshold is re-applied here).
  */
-import { sql } from 'drizzle-orm';
+import { desc, sql } from 'drizzle-orm';
 import { getDb } from '../db/client';
 import { evalRuns } from '../db/schema';
 import { getRepository } from '../data';
-import { loadGolden } from './golden';
+import { loadGoldenSet } from './golden-store';
 import type { EvaluationMetrics } from '@insightlibrary/schemas';
 
-const round = (n: number) => Math.round(n * 100) / 100;
+/**
+ * The four headline metrics are stored and surfaced on a PERCENTAGE scale
+ * (0–100), matching the dashboard cards (`${value}%`) and the seed fallback.
+ * The underlying computations are fractions (0–1), so pct() scales them. The
+ * per-test `faithfulness` stays 0–1 (the table renders it with .toFixed(2)).
+ */
+const pct = (fraction: number) => Math.round(fraction * 1000) / 10;
 
 export async function runGoldenEval(orgId = 'org_1'): Promise<EvaluationMetrics> {
 	const repo = getRepository();
-	const golden = loadGolden();
+	// Admin-managed golden set (DB, seeded from the bundle on first run); falls
+	// back to the bundled file when the table is empty / DB is unavailable.
+	const golden = await loadGoldenSet(orgId);
 	const recentTests: EvaluationMetrics['recentTests'] = [];
 	let hits = 0;
 
@@ -55,10 +63,10 @@ export async function runGoldenEval(orgId = 'org_1'): Promise<EvaluationMetrics>
 	}
 
 	const metrics: EvaluationMetrics = {
-		faithfulness: round(faithfulness),
-		citationAccuracy: round(recall),
-		hallucinationRate: round(1 - faithfulness),
-		noveltyPrecision: round(noveltyPrecision),
+		faithfulness: pct(faithfulness),
+		citationAccuracy: pct(recall),
+		hallucinationRate: pct(1 - faithfulness),
+		noveltyPrecision: pct(noveltyPrecision),
 		recentTests: recentTests.slice(0, 10)
 	};
 
@@ -74,4 +82,49 @@ export async function runGoldenEval(orgId = 'org_1'): Promise<EvaluationMetrics>
 		});
 	}
 	return metrics;
+}
+
+/** One persisted eval run for the history/trend view (B34). Percentage-scaled. */
+export interface EvalRunSummary {
+	id: string;
+	faithfulness: number;
+	citationAccuracy: number;
+	hallucinationRate: number;
+	noveltyPrecision: number;
+	createdAt: string;
+}
+
+/**
+ * Most-recent persisted eval runs (newest first) for the evaluation dashboard's
+ * real trend deltas. Empty when no DB / no runs — the UI then omits trend chips.
+ */
+export async function recentEvalRuns(orgId = 'org_1', limit = 10): Promise<EvalRunSummary[]> {
+	const db = getDb();
+	if (!db) return [];
+	try {
+		const rows = await db
+			.select({
+				id: evalRuns.id,
+				faithfulness: evalRuns.faithfulness,
+				citationAccuracy: evalRuns.citationAccuracy,
+				hallucinationRate: evalRuns.hallucinationRate,
+				noveltyPrecision: evalRuns.noveltyPrecision,
+				createdAt: evalRuns.createdAt
+			})
+			.from(evalRuns)
+			.where(sql`${evalRuns.orgId} = ${orgId}`)
+			.orderBy(desc(evalRuns.createdAt))
+			.limit(Math.min(Math.max(1, limit), 50));
+		return rows.map((r) => ({
+			id: r.id,
+			faithfulness: r.faithfulness,
+			citationAccuracy: r.citationAccuracy,
+			hallucinationRate: r.hallucinationRate,
+			noveltyPrecision: r.noveltyPrecision,
+			createdAt: r.createdAt.toISOString()
+		}));
+	} catch (e) {
+		console.error('[eval] recentEvalRuns failed:', e instanceof Error ? e.message : e);
+		return [];
+	}
 }

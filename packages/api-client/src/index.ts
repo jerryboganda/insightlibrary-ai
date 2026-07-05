@@ -4,6 +4,7 @@ import type {
 	AiProvidersResponse,
 	AuditLog,
 	Claim,
+	CopilotAttachment,
 	CopilotMode,
 	CoverageRow,
 	DeltaEntry,
@@ -147,6 +148,161 @@ export interface TopicVerifyResult {
 	verifiedAt: string;
 }
 
+// ── Research suite: persisted projects across all four tools (B10) ───────────
+
+export const RESEARCH_TYPES = ['argument_map', 'compare_matrix', 'report', 'timeline'] as const;
+export type ResearchType = (typeof RESEARCH_TYPES)[number];
+
+export interface ArgumentMapNode {
+	id: string;
+	kind: 'premise' | 'evidence' | 'conclusion';
+	label: string;
+	text: string;
+	source?: string;
+}
+export interface ArgumentMapData {
+	nodes: ArgumentMapNode[];
+}
+
+export type MatrixCellTone = 'default' | 'agree' | 'conflict' | 'missing';
+export interface MatrixCell {
+	text: string;
+	tone?: MatrixCellTone;
+}
+export interface MatrixRow {
+	id: string;
+	concept: string;
+	cells: MatrixCell[];
+}
+export interface CompareMatrixData {
+	columns: string[];
+	rows: MatrixRow[];
+}
+
+export interface ReportSource {
+	id: string;
+	label: string;
+	/** SSOT topic id — its claims ground the synthesis when present. */
+	topicId?: string;
+}
+export interface ReportData {
+	prompt: string;
+	strictCitation: boolean;
+	sources: ReportSource[];
+	body: string;
+	generatedBy?: 'ai' | 'manual' | 'fallback';
+	generatedAt?: string;
+	wordCount?: number;
+	citationCount?: number;
+}
+
+export interface TimelineEventItem {
+	id: string;
+	phase: string;
+	stage: string;
+	description: string;
+	tone: 'default' | 'critical';
+}
+export interface TimelineData {
+	events: TimelineEventItem[];
+}
+
+/** Maps a research type to its `data` blob shape. */
+export interface ResearchDataByType {
+	argument_map: ArgumentMapData;
+	compare_matrix: CompareMatrixData;
+	report: ReportData;
+	timeline: TimelineData;
+}
+
+/** A persisted research project (one row serves any one tool). */
+export interface ResearchProject<T extends ResearchType = ResearchType> {
+	id: string;
+	type: T;
+	title: string;
+	data: ResearchDataByType[T];
+	createdAt: string;
+	updatedAt: string;
+}
+
+/** POST /api/research/[id]/generate response for report projects. */
+export interface ReportGenerateResult {
+	ok: boolean;
+	/** Present only when ok. */
+	generatedBy?: 'ai' | 'fallback';
+	body?: string;
+	wordCount?: number;
+	citationCount?: number;
+	project?: ResearchProject<'report'>;
+	/** Present when ok:false — an honest explanation (e.g. no evidence linked). */
+	reason?: string;
+}
+
+// ── Ontology: import / schema editor / test (A11, B23) ───────────────────────
+
+export interface OntologyConceptKind {
+	kind: string;
+	count: number;
+	samples: { id: string; prefLabel: string; synonyms: string[] }[];
+}
+export interface OntologySchemaProperty {
+	id: string;
+	name: string;
+	type: string;
+	required: boolean;
+	desc: string;
+}
+export interface OntologySchemaEntity {
+	id: string;
+	name: string;
+	mergeStrategy: 'append' | 'review';
+	properties: OntologySchemaProperty[];
+}
+export interface OntologySchemaView {
+	id: string;
+	ontology: string;
+	name: string;
+	status: 'active' | 'draft';
+	stored: boolean;
+	conceptKinds: OntologyConceptKind[];
+	conceptTotal: number;
+	synonymTotal: number;
+	schema: { entities: OntologySchemaEntity[] };
+	updatedAt: string | null;
+}
+export interface OntologyTestResult {
+	mentionsTested: number;
+	linkedCount: number;
+	entities: {
+		mention: string;
+		conceptId: string;
+		prefLabel: string;
+		ontology: string;
+		score: number;
+		match: 'exact' | 'semantic';
+	}[];
+	unmatched: string[];
+}
+
+// ── Evaluation: run history + admin-managed golden set (B34, C8) ──────────────
+
+export interface EvalRunSummary {
+	id: string;
+	faithfulness: number;
+	citationAccuracy: number;
+	hallucinationRate: number;
+	noveltyPrecision: number;
+	createdAt: string;
+}
+export interface GoldenRecord {
+	id: string;
+	query: string;
+	expect: string;
+	source: 'seed' | 'custom';
+	createdAt: string;
+	updatedAt: string;
+}
+
 export class ApiClient {
 	constructor(private readonly options: ApiClientOptions) {}
 
@@ -252,6 +408,40 @@ export class ApiClient {
 	verifyTopic = (id: string) =>
 		this.request<TopicVerifyResult>(`/api/topics/${id}/verify`, { method: 'POST' });
 
+	// Research suite (B10) — persisted projects for all four tools (one table).
+	/** List the org's research projects, optionally filtered by tool type. */
+	listResearchProjects = (type?: ResearchType) =>
+		this.request<ListEnvelope<ResearchProject>>(
+			`/api/research${type ? `?type=${type}` : ''}`
+		).then((r) => r.items);
+	/** Create a project. compare_matrix seeds columns from the source registry. */
+	createResearchProject = <T extends ResearchType>(type: T, title: string) =>
+		this.request<ResearchProject<T>>('/api/research', {
+			method: 'POST',
+			body: JSON.stringify({ type, title })
+		});
+	/** Load one project by id (org-scoped). */
+	getResearchProject = <T extends ResearchType = ResearchType>(id: string) =>
+		this.request<ResearchProject<T>>(`/api/research/${id}`);
+	/** Rename and/or replace the tool document. `data` is type-checked server-side. */
+	updateResearchProject = <T extends ResearchType>(
+		id: string,
+		patch: { title?: string; data?: ResearchDataByType[T] }
+	) =>
+		this.request<ResearchProject<T>>(`/api/research/${id}`, {
+			method: 'PATCH',
+			body: JSON.stringify(patch)
+		});
+	deleteResearchProject = (id: string) =>
+		this.request<{ ok: true }>(`/api/research/${id}`, { method: 'DELETE' });
+	/**
+	 * Generate a report project's body through the provider router (synthesis),
+	 * grounded in the linked SSOT sources' claims (editor+). ok:false with a reason
+	 * when no evidence is linked; falls back to a deterministic digest with no AI.
+	 */
+	generateResearchReport = (id: string) =>
+		this.request<ReportGenerateResult>(`/api/research/${id}/generate`, { method: 'POST' });
+
 	// Study / exam engine
 	listFlashcards = (topicId?: string) =>
 		this.request<ListEnvelope<Flashcard>>(
@@ -330,6 +520,44 @@ export class ApiClient {
 	// Ontology
 	expandOntology = (q: string) =>
 		this.request<{ query: string; aliases: string[] }>(`/api/ontology/expand?q=${encodeURIComponent(q)}`);
+	/** Create an empty named ontology draft (admin). */
+	createOntology = (input: { name: string; slug?: string; description?: string }) =>
+		this.request<{ id: string; ontology: string; name: string; entities: number; relations: number; status: 'draft' }>(
+			'/api/ontologies',
+			{ method: 'POST', body: JSON.stringify(input) }
+		);
+	/** Import concepts from a JSON / term-list / OBO payload, loading them synchronously (admin). */
+	importOntology = (input: { content: string; ontology?: string; name?: string; format?: 'json' | 'terms' | 'obo' }) =>
+		this.request<{
+			ok: true;
+			format: 'json' | 'terms' | 'obo';
+			ontology: string;
+			ontologyId: string;
+			concepts: number;
+			synonyms: number;
+			edges: number;
+			embeddings: number;
+		}>('/api/ontologies/import', { method: 'POST', body: JSON.stringify(input) });
+	/** Delete an ontology and its concepts/synonyms/embeddings/edges/schema (admin). */
+	deleteOntology = (id: string) =>
+		this.request<{ ok: true; ontology: string; deletedConcepts: number; deletedSynonyms: number }>(
+			`/api/ontologies/${id}`,
+			{ method: 'DELETE' }
+		);
+	/** Real ontology schema view: concept-kind dictionary + the editable entity/property/merge layer (B23). */
+	getOntologySchema = (id: string) =>
+		this.request<OntologySchemaView>(`/api/ontologies/${id}/schema`);
+	/** Persist the editable schema layer (admin). */
+	saveOntologySchema = (
+		id: string,
+		input: { name?: string; status?: 'active' | 'draft'; schema?: { entities: OntologySchemaEntity[] } }
+	) => this.request<OntologySchemaView>(`/api/ontologies/${id}/schema`, { method: 'PUT', body: JSON.stringify(input) });
+	/** Run sample text through the real ontology linker to preview what it resolves to (B23). */
+	testOntology = (text: string, mentions?: string[]) =>
+		this.request<OntologyTestResult>('/api/ontology/test', {
+			method: 'POST',
+			body: JSON.stringify({ text, mentions })
+		});
 
 	// Multi-provider AI settings
 	getAiProviders = () => this.request<AiProvidersResponse>('/api/ai/providers');
@@ -525,8 +753,20 @@ export class ApiClient {
 	/** Usage metering aggregates; period defaults to the current calendar month. */
 	getUsage = (period?: 'month' | 'all') =>
 		this.request<UsageMetrics>(`/api/usage${period ? `?period=${period}` : ''}`);
-	getEvaluation = () => this.request<EvaluationMetrics>('/api/evaluation');
+	/** Latest metrics + recent-run history (newest-first) for trend deltas (B34). */
+	getEvaluation = (historyLimit?: number) =>
+		this.request<EvaluationMetrics & { history: EvalRunSummary[] }>(
+			`/api/evaluation${historyLimit ? `?history=${historyLimit}` : ''}`
+		);
 	runEvaluation = () => this.request<EvaluationMetrics>('/api/evaluation/run', { method: 'POST' });
+	// Golden evaluation set (C8): admin-managed, seeded from the bundled set on first read.
+	listGolden = () => this.request<ListEnvelope<GoldenRecord>>('/api/evaluation/golden').then((r) => r.items);
+	createGolden = (input: { query: string; expect: string }) =>
+		this.request<GoldenRecord>('/api/evaluation/golden', { method: 'POST', body: JSON.stringify(input) });
+	updateGolden = (id: string, patch: { query?: string; expect?: string }) =>
+		this.request<GoldenRecord>(`/api/evaluation/golden/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+	deleteGolden = (id: string) =>
+		this.request<{ ok: true }>(`/api/evaluation/golden/${id}`, { method: 'DELETE' });
 	listProcessing = () =>
 		this.request<ListEnvelope<ProcessingJob>>('/api/processing').then((r) => r.items);
 	/** Real pipeline rollups: queue/stage counts, throughput, avg durations (B16). */
@@ -588,7 +828,12 @@ export class ApiClient {
 	markAllNotificationsRead = () => this.request<{ ok: true }>('/api/notifications', { method: 'POST' });
 
 	// Copilot — returns the raw Response so callers can read the SSE stream.
-	copilotStream = async (input: { mode: CopilotMode; message: string; topicId?: string }) => {
+	copilotStream = async (input: {
+		mode: CopilotMode;
+		message: string;
+		topicId?: string;
+		attachment?: CopilotAttachment;
+	}) => {
 		const fetchImpl = this.options.fetchImpl ?? fetch;
 		const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'text/event-stream' });
 		const token = await this.options.getToken?.();

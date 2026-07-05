@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { createQuery } from '@tanstack/svelte-query';
+	import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
 	import {
 		Tag,
 		Download,
@@ -9,13 +9,18 @@
 		HeartPulse,
 		Network,
 		X,
-		Clock
+		Clock,
+		Loader2,
+		CheckCircle2,
+		AlertCircle
 	} from '@lucide/svelte';
 	import { fade, fly, scale } from 'svelte/transition';
 	import { api } from '$lib/api';
 	import { Skeleton } from '$lib/components/ui';
 	import { cn } from '$lib/utils';
 	import type { Ontology } from '@insightlibrary/schemas';
+
+	const queryClient = useQueryClient();
 
 	// Live domain ontologies from the real API. The schema carries a compact shape
 	// (id/name/entities/relations/status/lastUpdated). The prototype presents each
@@ -98,17 +103,81 @@
 	let newName = $state('');
 	let newDescription = $state('');
 	let importJson = $state('');
+	let importName = $state('');
+	// Import format: auto-detect (default) or force loader JSON / term list / OBO.
+	let importFormat = $state<'auto' | 'json' | 'terms' | 'obo'>('auto');
 
-	const importPlaceholder = `{
-  "name": "Custom Schema",
-  "entities": [
-    {
-      "id": "e_1",
-      "name": "Topic",
-      "properties": []
-    }
-  ]
-}`;
+	function errMsg(e: unknown): string {
+		return e instanceof Error ? e.message : 'Request failed';
+	}
+
+	// ── Create empty ontology (POST /api/ontologies) ─────────────────────────────
+	const createOntology = createMutation({
+		mutationFn: (input: { name: string; description?: string }) => api.createOntology(input),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ['ontologies'] });
+			isNewOpen = false;
+			newName = '';
+			newDescription = '';
+		}
+	});
+
+	function submitCreate() {
+		const name = newName.trim();
+		if (!name) return;
+		$createOntology.mutate({ name, description: newDescription.trim() || undefined });
+	}
+
+	// ── Import ontology (POST /api/ontologies/import) ────────────────────────────
+	// Real result of the last import (concept/synonym/edge counts) for an honest
+	// success panel; cleared when the modal is reopened.
+	let importResult = $state<{ concepts: number; synonyms: number; edges: number; embeddings: number; ontology: string } | null>(null);
+
+	const importOntology = createMutation({
+		mutationFn: (input: { content: string; name?: string; format?: 'json' | 'terms' | 'obo' }) =>
+			api.importOntology(input),
+		onSuccess: (res) => {
+			importResult = res;
+			queryClient.invalidateQueries({ queryKey: ['ontologies'] });
+		}
+	});
+
+	function submitImport() {
+		const content = importJson.trim();
+		if (!content) return;
+		importResult = null;
+		$importOntology.reset();
+		$importOntology.mutate({
+			content,
+			name: importName.trim() || undefined,
+			format: importFormat === 'auto' ? undefined : importFormat
+		});
+	}
+
+	function openImport() {
+		importJson = '';
+		importName = '';
+		importFormat = 'auto';
+		importResult = null;
+		$importOntology.reset();
+		isImportOpen = true;
+	}
+
+	function openCreate() {
+		newName = '';
+		newDescription = '';
+		$createOntology.reset();
+		isNewOpen = true;
+	}
+
+	const importPlaceholder = `Loader JSON:
+{ "concepts": [ { "prefLabel": "Sepsis", "kind": "disease", "synonyms": ["septicaemia"] } ] }
+
+— or a simple term list (one per line, optional | synonyms):
+Sepsis | septicaemia; blood poisoning
+Hypertension | high blood pressure
+
+— or OBO ([Term] stanzas). Format is auto-detected.`;
 </script>
 
 <main class="relative w-full overflow-y-auto">
@@ -125,13 +194,13 @@
 			</div>
 			<div class="flex gap-3">
 				<button
-					onclick={() => (isImportOpen = true)}
+					onclick={openImport}
 					class="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800 focus:ring-1 focus:ring-zinc-700 focus:outline-none"
 				>
 					<Download class="h-4 w-4" /> Import Schema
 				</button>
 				<button
-					onclick={() => (isNewOpen = true)}
+					onclick={openCreate}
 					class="flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-indigo-600/20 transition-colors hover:bg-indigo-500 focus:ring-2 focus:ring-indigo-500/50 focus:outline-none"
 				>
 					<Plus class="h-4 w-4" /> New Ontology
@@ -161,7 +230,7 @@
 					knowledge.
 				</p>
 				<button
-					onclick={() => (isNewOpen = true)}
+					onclick={openCreate}
 					class="mt-5 flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
 				>
 					<Plus class="h-4 w-4" /> New Ontology
@@ -254,19 +323,37 @@
 						class="h-24 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
 					></textarea>
 				</div>
+				<p class="text-xs text-zinc-500">
+					Creates an empty draft ontology. Add concepts afterwards via
+					<span class="text-zinc-400">Import Schema</span>.
+				</p>
+				{#if $createOntology.isError}
+					<div
+						class="flex items-start gap-2 rounded-md border border-rose-900/50 bg-rose-950/20 p-3 text-xs text-rose-300"
+					>
+						<AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+						<span>{errMsg($createOntology.error)}</span>
+					</div>
+				{/if}
 			</div>
 			<div class="flex justify-end gap-3 border-t border-zinc-800 bg-zinc-900/50 p-4">
 				<button
 					onclick={() => (isNewOpen = false)}
-					class="px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:text-zinc-100"
+					disabled={$createOntology.isPending}
+					class="px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:text-zinc-100 disabled:opacity-40"
 				>
 					Cancel
 				</button>
 				<button
-					onclick={() => (isNewOpen = false)}
-					class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
+					onclick={submitCreate}
+					disabled={$createOntology.isPending || !newName.trim()}
+					class="flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
 				>
-					Create Schema
+					{#if $createOntology.isPending}
+						<Loader2 class="h-4 w-4 animate-spin" /> Creating…
+					{:else}
+						Create Ontology
+					{/if}
 				</button>
 			</div>
 		</div>
@@ -290,7 +377,7 @@
 			aria-modal="true"
 		>
 			<div class="flex items-center justify-between border-b border-zinc-800 bg-zinc-900/30 p-6">
-				<h2 class="text-lg font-semibold text-zinc-100">Import Ontology JSON Schema</h2>
+				<h2 class="text-lg font-semibold text-zinc-100">Import Ontology</h2>
 				<button
 					onclick={() => (isImportOpen = false)}
 					class="rounded-md p-1 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
@@ -298,25 +385,78 @@
 					<X class="h-4 w-4" />
 				</button>
 			</div>
-			<div class="p-6">
+			<div class="space-y-4 p-6">
+				<div class="flex flex-col gap-3 sm:flex-row">
+					<div class="flex-1 space-y-2">
+						<label class="text-sm font-medium text-zinc-300" for="import-ont-name">
+							Ontology Name <span class="font-normal text-zinc-500">(optional)</span>
+						</label>
+						<input
+							id="import-ont-name"
+							type="text"
+							bind:value={importName}
+							placeholder="e.g. Custom Sepsis Terms"
+							class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
+						/>
+					</div>
+					<div class="space-y-2 sm:w-40">
+						<label class="text-sm font-medium text-zinc-300" for="import-format">Format</label>
+						<select
+							id="import-format"
+							bind:value={importFormat}
+							class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500/50 focus:outline-none"
+						>
+							<option value="auto">Auto-detect</option>
+							<option value="json">Loader JSON</option>
+							<option value="terms">Term list</option>
+							<option value="obo">OBO</option>
+						</select>
+					</div>
+				</div>
 				<textarea
 					bind:value={importJson}
 					placeholder={importPlaceholder}
-					class="h-64 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 font-mono text-xs text-zinc-300 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
+					class="h-56 w-full resize-none rounded-md border border-zinc-800 bg-zinc-900 px-3 py-3 font-mono text-xs text-zinc-300 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
 				></textarea>
+
+				{#if $importOntology.isError}
+					<div
+						class="flex items-start gap-2 rounded-md border border-rose-900/50 bg-rose-950/20 p-3 text-xs text-rose-300"
+					>
+						<AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+						<span>{errMsg($importOntology.error)}</span>
+					</div>
+				{:else if importResult}
+					<div
+						class="flex items-start gap-2 rounded-md border border-emerald-900/50 bg-emerald-950/20 p-3 text-xs text-emerald-300"
+					>
+						<CheckCircle2 class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+						<span>
+							Imported <span class="font-semibold">{importResult.concepts}</span> concepts,
+							{importResult.synonyms} synonyms and {importResult.edges} relations into
+							<span class="font-mono">{importResult.ontology}</span> ({importResult.embeddings} embeddings computed).
+						</span>
+					</div>
+				{/if}
 			</div>
 			<div class="flex justify-end gap-3 border-t border-zinc-800 bg-zinc-900/50 p-4">
 				<button
 					onclick={() => (isImportOpen = false)}
-					class="px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:text-zinc-100"
+					disabled={$importOntology.isPending}
+					class="px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:text-zinc-100 disabled:opacity-40"
 				>
-					Cancel
+					{importResult ? 'Close' : 'Cancel'}
 				</button>
 				<button
-					onclick={() => (isImportOpen = false)}
-					class="rounded-md border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700"
+					onclick={submitImport}
+					disabled={$importOntology.isPending || !importJson.trim()}
+					class="flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50"
 				>
-					Import &amp; Validate
+					{#if $importOntology.isPending}
+						<Loader2 class="h-4 w-4 animate-spin" /> Importing…
+					{:else}
+						Import &amp; Load
+					{/if}
 				</button>
 			</div>
 		</div>

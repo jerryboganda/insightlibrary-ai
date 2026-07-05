@@ -52,10 +52,25 @@ export const copilotModeSchema = z.enum([
 ]);
 export type CopilotMode = z.infer<typeof copilotModeSchema>;
 
+/**
+ * An in-context reference the copilot grounds its answer in. The chip in the
+ * Copilot panel attaches an existing topic or document by id (not an uploaded
+ * file — the copilot route has no file-extraction path); the route pulls the
+ * entity's claims/chunks as retrieval context. `label` is display-only.
+ */
+export const copilotAttachmentSchema = z.object({
+	kind: z.enum(['topic', 'document']),
+	id: z.string().min(1),
+	label: z.string().optional()
+});
+export type CopilotAttachment = z.infer<typeof copilotAttachmentSchema>;
+
 export const copilotRequestSchema = z.object({
 	mode: copilotModeSchema,
 	message: z.string().min(1),
-	topicId: z.string().optional()
+	topicId: z.string().optional(),
+	/** Optional in-context reference to ground the answer in (topic/document). */
+	attachment: copilotAttachmentSchema.optional()
 });
 export type CopilotRequest = z.infer<typeof copilotRequestSchema>;
 

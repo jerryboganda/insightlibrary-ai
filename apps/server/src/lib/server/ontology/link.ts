@@ -4,11 +4,18 @@
  *    embedding nearest-neighbor over concept_embeddings (recall).
  *  - expandAliases(): concept prefLabel + synonyms + 1-hop neighbor labels, used
  *    by the topic-recall audit and topic composition.
- * Worker-safe (process.env via getDb()).
+ *
+ * The NN cutoff (ontologyLinkMaxDistance) is org-configurable: it comes from
+ * getOrgSettings(orgId) — an admin-editable value that falls back to the
+ * ONTOLOGY_LINK_MAX_DISTANCE env var (config residual). Callers that don't yet
+ * thread an org id get the 'org_1' default, matching every other org-scoped
+ * getter in the codebase.
+ * Worker-safe (process.env via getDb(); getOrgSettings is worker-safe too).
  */
 import { sql } from 'drizzle-orm';
 import { getDb } from '../db/client';
 import { embedText } from '../ai/embeddings';
+import { getOrgSettings } from '../org-settings';
 
 export interface LinkResult {
 	conceptId: string;
@@ -17,9 +24,18 @@ export interface LinkResult {
 	score: number;
 }
 
-const DISTANCE_THRESHOLD = Number(process.env.ONTOLOGY_LINK_MAX_DISTANCE ?? '0.4');
+/** Resolve the NN distance cutoff for an org (stored override → env default). */
+async function distanceThreshold(orgId: string): Promise<number> {
+	try {
+		return (await getOrgSettings(orgId)).ontologyLinkMaxDistance;
+	} catch {
+		// org-settings already degrades to env defaults internally; this guard is
+		// belt-and-suspenders so linking never crashes on a settings blip.
+		return Number(process.env.ONTOLOGY_LINK_MAX_DISTANCE ?? '0.4');
+	}
+}
 
-export async function linkMention(mention: string): Promise<LinkResult | null> {
+export async function linkMention(mention: string, orgId = 'org_1'): Promise<LinkResult | null> {
 	const db = getDb();
 	if (!db) return null;
 	const clean = mention.trim();
@@ -54,7 +70,7 @@ export async function linkMention(mention: string): Promise<LinkResult | null> {
 	`);
 	if (!nn.rows.length) return null;
 	const r = nn.rows[0];
-	if (Number(r.dist) > DISTANCE_THRESHOLD) return null;
+	if (Number(r.dist) > (await distanceThreshold(orgId))) return null;
 	return { conceptId: r.id, prefLabel: r.pref_label, ontology: r.ontology, score: 1 - Number(r.dist) };
 }
 
@@ -63,11 +79,11 @@ export async function linkMention(mention: string): Promise<LinkResult | null> {
  * synonyms + labels of its 1-hop neighbors. Returns the mention itself if
  * nothing links, so callers can always query with at least the surface form.
  */
-export async function expandAliases(mention: string): Promise<string[]> {
+export async function expandAliases(mention: string, orgId = 'org_1'): Promise<string[]> {
 	const db = getDb();
 	const base = new Set<string>([mention.trim()].filter(Boolean));
 	if (!db) return [...base];
-	const link = await linkMention(mention).catch(() => null);
+	const link = await linkMention(mention, orgId).catch(() => null);
 	if (!link) return [...base];
 
 	const rows = await db.execute<{ label: string }>(sql`

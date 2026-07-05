@@ -7,6 +7,7 @@
 import type { ParsedDoc } from './types';
 import { parseHeuristic } from './heuristic';
 import { getRouter } from '../../ai/providers';
+import { getOrgSettings } from '../../org-settings';
 
 const PARSE_SCHEMA: Record<string, unknown> = {
 	type: 'object',
@@ -23,12 +24,14 @@ const PARSE_SCHEMA: Record<string, unknown> = {
 	required: ['tables', 'figures']
 };
 
-export async function parseDocumentAi(bytes: Uint8Array, filename: string): Promise<ParsedDoc> {
+export async function parseDocumentAi(bytes: Uint8Array, filename: string, orgId = 'org_1'): Promise<ParsedDoc> {
 	const base = await parseHeuristic(bytes, filename);
-	const router = getRouter();
+	const router = getRouter(orgId);
 	if (!router.available('extraction')) return base;
 
-	const cap = Number(process.env.PARSE_AI_MAX_PAGES ?? '20');
+	// Admin-tunable page cap (org settings; falls back to PARSE_AI_MAX_PAGES env,
+	// then the built-in default) instead of reading the env var directly.
+	const cap = (await getOrgSettings(orgId).catch(() => null))?.parseAiMaxPages ?? Number(process.env.PARSE_AI_MAX_PAGES ?? '20');
 	const byPage = new Map<number, string>();
 	for (const b of base.blocks) byPage.set(b.page, `${byPage.get(b.page) ?? ''}${b.content}\n`);
 

@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { fly, scale } from 'svelte/transition';
-	import { tick } from 'svelte';
+	import { tick, onMount } from 'svelte';
 	import { page } from '$app/state';
-	import { Sparkles, X, Plus, MessageSquare, FileText, Search, Activity, Globe, Settings2 } from '@lucide/svelte';
-	import type { CopilotMode } from '@insightlibrary/schemas';
+	import { Sparkles, X, Plus, MessageSquare, FileText, Search, Activity, Globe, Settings2, Paperclip, BookOpen } from '@lucide/svelte';
+	import type { CopilotMode, CopilotAttachment } from '@insightlibrary/schemas';
 	import { readSSE } from '@insightlibrary/api-client';
 	import { api } from '$lib/api';
 	import { cn } from '$lib/utils';
@@ -31,24 +31,78 @@
 		{ name: 'Delta Knowledge Mode', value: 'delta', icon: Settings2 }
 	];
 
+	const byValue = (v: CopilotMode) => modes.find((m) => m.value === v) ?? modes[0];
+
 	let open = $state(true);
 	let modeOpen = $state(false);
-	let mode = $state(modes[1]); // Strict Citation
+	let mode = $state(byValue('ask'));
 	let input = $state('');
 	let streaming = $state(false);
 	let scroller = $state<HTMLDivElement>();
 
-	// Client-side attach affordance: hidden file input + chosen file name chip.
-	let fileInput = $state<HTMLInputElement>();
-	let attachedName = $state<string | null>(null);
+	// The workspace's default answering policy decides the initial copilot mode
+	// (strict_citation when strictCitationDefault is on). Loaded once on mount;
+	// silently keeps 'ask' if settings are unreachable.
+	onMount(async () => {
+		try {
+			const s = await api.getOrgSettings();
+			mode = byValue(s.settings.strictCitationDefault ? 'strict_citation' : 'ask');
+		} catch {
+			/* keep default */
+		}
+	});
 
-	function onFilePicked(e: Event) {
-		const target = e.currentTarget as HTMLInputElement;
-		attachedName = target.files?.[0]?.name ?? null;
+	// ── Attach an in-context reference (topic/document) the answer is grounded in.
+	// This is NOT a file upload: the copilot route grounds on an entity's
+	// claims/chunks, so the picker lists real topics & documents by id.
+	let attachOpen = $state(false);
+	let attachment = $state<CopilotAttachment | null>(null);
+	let attachLoading = $state(false);
+	let attachError = $state<string | null>(null);
+	let attachOptions = $state<CopilotAttachment[]>([]);
+	let attachLoaded = false;
+	let attachFilter = $state('');
+
+	async function openAttach() {
+		attachOpen = !attachOpen;
+		if (!attachOpen || attachLoaded) return;
+		attachLoading = true;
+		attachError = null;
+		try {
+			const [topics, documents] = await Promise.all([
+				api.listTopics().catch(() => []),
+				api.listDocuments().catch(() => [])
+			]);
+			attachOptions = [
+				...topics.map((t) => ({ kind: 'topic' as const, id: t.id, label: t.name })),
+				...documents.map((d) => ({ kind: 'document' as const, id: d.id, label: d.title }))
+			];
+			attachLoaded = true;
+		} catch (e) {
+			attachError = e instanceof Error ? e.message : 'Could not load context items.';
+		} finally {
+			attachLoading = false;
+		}
 	}
 
+	function pickAttachment(a: CopilotAttachment) {
+		attachment = a;
+		attachOpen = false;
+		attachFilter = '';
+	}
+
+	const filteredOptions = $derived.by(() => {
+		const q = attachFilter.trim().toLowerCase();
+		if (!q) return attachOptions;
+		return attachOptions.filter((o) => (o.label ?? o.id).toLowerCase().includes(q));
+	});
+
 	let messages = $state<Msg[]>([
-		{ id: 1, sender: 'agent', text: "I have scanned Book D and found 9 new unique claims for Addison's Disease. Ask me anything, grounded in your single source of truth." }
+		{
+			id: 1,
+			sender: 'agent',
+			text: 'Grounded in your single source of truth. Ask a question, or attach a topic or document to scope the answer.'
+		}
 	]);
 
 	/** If viewing a topic, ground strict-citation / SSOT answers in it. */
@@ -73,7 +127,12 @@
 		await scrollDown();
 
 		try {
-			const res = await api.copilotStream({ mode: mode.value, message: prompt, topicId });
+			const res = await api.copilotStream({
+				mode: mode.value,
+				message: prompt,
+				topicId,
+				attachment: attachment ?? undefined
+			});
 			await readSSE<{ type: string; value: string }>(res, (chunk) => {
 				if (chunk.type === 'token') {
 					agentMsg.text += chunk.value;
@@ -157,25 +216,57 @@
 					{/each}
 				</div>
 			{/if}
+			{#if attachOpen}
+				<div class="absolute bottom-full left-3 mb-2 z-10 flex max-h-72 w-64 flex-col rounded-lg border border-zinc-800 bg-zinc-900 shadow-xl">
+					<div class="border-b border-zinc-800 p-2">
+						<input
+							bind:value={attachFilter}
+							placeholder="Filter topics & documents…"
+							class="w-full rounded bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none"
+						/>
+					</div>
+					<div class="flex-1 overflow-y-auto p-1">
+						{#if attachLoading}
+							<p class="px-2 py-3 text-center text-[11px] text-zinc-500">Loading context items…</p>
+						{:else if attachError}
+							<p class="px-2 py-3 text-center text-[11px] text-rose-400">{attachError}</p>
+						{:else if filteredOptions.length === 0}
+							<p class="px-2 py-3 text-center text-[11px] text-zinc-500">
+								{attachOptions.length === 0 ? 'No topics or documents yet.' : 'No matches.'}
+							</p>
+						{:else}
+							{#each filteredOptions as opt (opt.kind + opt.id)}
+								<button
+									onclick={() => pickAttachment(opt)}
+									class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-300 transition-colors hover:bg-zinc-800"
+								>
+									{#if opt.kind === 'topic'}<BookOpen class="h-3.5 w-3.5 shrink-0 text-indigo-400" />{:else}<FileText class="h-3.5 w-3.5 shrink-0 text-sky-400" />{/if}
+									<span class="truncate">{opt.label ?? opt.id}</span>
+								</button>
+							{/each}
+						{/if}
+					</div>
+				</div>
+			{/if}
 			<div class="mb-2 flex items-center gap-2">
 				<button
-					onclick={() => (modeOpen = !modeOpen)}
+					onclick={() => {
+						modeOpen = !modeOpen;
+						attachOpen = false;
+					}}
 					class="flex items-center gap-1.5 rounded bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300 transition-colors hover:bg-zinc-700"
 				>
 					<FileText class="h-3 w-3 text-indigo-400" /> {mode.name}
 				</button>
-				{#if attachedName}
+				{#if attachment}
 					<span
 						class="flex items-center gap-1 rounded bg-indigo-500/15 px-2 py-0.5 text-[10px] text-indigo-300"
 					>
-						<FileText class="h-3 w-3" />
-						<span class="max-w-[8rem] truncate">{attachedName}</span>
+						{#if attachment.kind === 'topic'}<BookOpen class="h-3 w-3" />{:else}<FileText class="h-3 w-3" />{/if}
+						<span class="max-w-[8rem] truncate">{attachment.label ?? attachment.id}</span>
 						<button
 							type="button"
-							onclick={() => {
-								attachedName = null;
-								if (fileInput) fileInput.value = '';
-							}}
+							onclick={() => (attachment = null)}
 							class="text-indigo-400 hover:text-indigo-200"
 							aria-label="Remove attachment"
 						>
@@ -191,14 +282,17 @@
 				}}
 				class="relative flex items-center rounded-md border border-zinc-800 bg-zinc-950 focus-within:border-indigo-500/50 focus-within:ring-1 focus-within:ring-indigo-500/50"
 			>
-				<input
-					bind:this={fileInput}
-					type="file"
-					class="hidden"
-					onchange={onFilePicked}
-				/>
-				<button type="button" onclick={() => fileInput?.click()} class="ml-1 rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" aria-label="Attach">
-					<Plus class="h-4 w-4" />
+				<button
+					type="button"
+					onclick={openAttach}
+					class={cn(
+						'ml-1 rounded p-1.5 transition-colors hover:bg-zinc-800 hover:text-zinc-300',
+						attachment ? 'text-indigo-400' : 'text-zinc-500'
+					)}
+					aria-label="Attach a topic or document as context"
+					title="Attach a topic or document as context"
+				>
+					{#if attachment}<Paperclip class="h-4 w-4" />{:else}<Plus class="h-4 w-4" />{/if}
 				</button>
 				<input
 					bind:value={input}

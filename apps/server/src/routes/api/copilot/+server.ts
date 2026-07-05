@@ -14,12 +14,40 @@ import { retrieveGlobalContext } from '$lib/server/graph/community';
 export const POST: RequestHandler = async ({ request, locals }) => {
 	const parsed = copilotRequestSchema.safeParse(await request.json().catch(() => null));
 	if (!parsed.success) throw error(400, 'Invalid copilot request');
-	const { mode, message, topicId } = parsed.data;
+	const { mode, message, topicId, attachment } = parsed.data;
+	const orgId = locals.user?.orgId || 'org_1';
+	const repo = getRepository();
 
-	// Ground strict-citation / SSOT modes in the topic's claims (local retrieval).
 	let context: string | undefined;
-	if (topicId && (mode === 'strict_citation' || mode === 'ssot')) {
-		const topic = await getRepository().getTopic(topicId);
+
+	// (1) An explicit in-context attachment (topic/document chip) grounds ANY mode.
+	//     Topic → its canonical claims; document → the top retrieved chunks from
+	//     that document for the question (real retrieval, not the whole file).
+	if (attachment) {
+		if (attachment.kind === 'topic') {
+			const topic = await repo.getTopic(attachment.id).catch(() => null);
+			if (topic?.sections?.length) {
+				context = `Attached topic "${topic.name}" — canonical claims:\n${topic.sections
+					.flatMap((s) => s.claims.map((c) => `- ${c.content} [${c.citations.join(' ')}]`))
+					.join('\n')}`;
+			}
+		} else {
+			const doc = await repo.getDocument(attachment.id).catch(() => null);
+			const { results } = await repo.search(message).catch(() => ({ results: [] }));
+			// Search chunk hrefs are /folders/{folderId}/{documentId}; keep only this doc.
+			const passages = results
+				.filter((r) => r.kind === 'chunk' && r.href.endsWith(`/${attachment.id}`))
+				.slice(0, 8)
+				.map((r) => `- ${r.snippet}`);
+			if (passages.length) {
+				context = `Attached document "${doc?.title ?? attachment.label ?? attachment.id}" — relevant passages:\n${passages.join('\n')}`;
+			}
+		}
+	}
+
+	// (2) Otherwise ground strict-citation / SSOT modes in the current topic's claims.
+	if (!context && topicId && (mode === 'strict_citation' || mode === 'ssot')) {
+		const topic = await repo.getTopic(topicId).catch(() => null);
 		if (topic?.sections) {
 			context = topic.sections
 				.flatMap((s) => s.claims.map((c) => `- ${c.content} [${c.citations.join(' ')}]`))
@@ -29,7 +57,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	// Dual-level GraphRAG: broad "research"/"deep_reasoning" queries get global
 	// community-level themes as context.
 	if (!context && (mode === 'research' || mode === 'deep_reasoning')) {
-		const themes = await retrieveGlobalContext(locals.user?.orgId || 'org_1').catch(() => []);
+		const themes = await retrieveGlobalContext(orgId).catch(() => []);
 		if (themes.length) context = `Knowledge-base themes:\n${themes.map((t) => `- ${t}`).join('\n')}`;
 	}
 
@@ -39,7 +67,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 	const credential = oauthToken
 		? { provider: 'chatgpt-oauth' as const, oauthToken }
 		: await resolveChatCredential({
-				orgId: locals.user?.orgId || 'org_1',
+				orgId,
 				userId: locals.user?.id
 			}).catch(() => null);
 
