@@ -29,6 +29,11 @@ export const DELETE: RequestHandler = async ({ url, locals }) => {
 	const provider = providerIdSchema.safeParse(url.searchParams.get('provider'));
 	if (!provider.success) throw error(400, 'Valid provider query param required');
 	const kscope = url.searchParams.get('scope') === 'user' ? 'user' : 'org';
+	// Mirror POST's authorization: org-shared keys are admin-managed; personal
+	// keys require the signed-in owner (otherwise deleteKey would silently fall
+	// through to the org branch and remove a shared key).
+	if (kscope === 'org') requireRole(locals.user, 'admin');
+	else if (!locals.user?.id) throw error(401, 'Sign in to remove a personal key');
 	await deleteKey(provider.data, {
 		orgId: locals.user?.orgId || 'org_1',
 		userId: locals.user?.id,

@@ -234,6 +234,8 @@ export const processingJobs = pgTable('processing_jobs', {
 	stage: text('stage').notNull().default('queued'),
 	progress: real('progress').notNull().default(0),
 	message: text('message').notNull().default(''),
+	/** pg-boss job id (written on enqueue) so cancel can boss.cancel() queued jobs. Column added in 0008. */
+	bossJobId: text('boss_job_id'),
 	startedAt: timestamp('started_at').notNull().defaultNow()
 });
 
@@ -355,6 +357,22 @@ export const mcqs = pgTable('mcqs', {
 	difficulty: text('difficulty').notNull().default('medium'),
 	examTags: jsonb('exam_tags').$type<string[]>().notNull().default([]),
 	status: text('status').notNull().default('draft'),
+	createdAt: timestamp('created_at').notNull().defaultNow()
+});
+
+// Server-graded MCQ answers (0009). Correct answers never ship in list
+// payloads to learners; grading happens in POST /api/mcqs/[id]/attempt which
+// records one row per submission. topic_id denormalized for per-topic
+// accuracy rollups (Weakness tab / study mastery).
+export const mcqAttempts = pgTable('mcq_attempts', {
+	id: text('id').primaryKey(),
+	orgId: text('org_id').notNull().references(() => organizations.id),
+	mcqId: text('mcq_id').notNull().references(() => mcqs.id),
+	topicId: text('topic_id').notNull().references(() => topics.id),
+	/** better-auth user id (not FK'd to the app users table); null for anonymous/dev-bypass edge cases. */
+	userId: text('user_id'),
+	chosenOptionId: text('chosen_option_id').notNull(),
+	correct: boolean('correct').notNull(),
 	createdAt: timestamp('created_at').notNull().defaultNow()
 });
 

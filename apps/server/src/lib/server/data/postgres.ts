@@ -30,6 +30,28 @@ import { rerankResults } from '../ai/rerank';
 import { expandQuery } from '../ai/expansion';
 import { computeCoverage } from './coverage';
 import { getOrgSettings } from '../org-settings';
+import { normalizeAppRole } from '../auth-config';
+
+/**
+ * Directory row returned by GET /api/users — the wire `User` enriched with the
+ * real better-auth account state. `hasLogin=false` marks rows without a login
+ * account (seed/local records); `emailVerified`/`createdAt` are null for them.
+ */
+export interface DirectoryUser extends User {
+	status: 'active' | 'suspended';
+	emailVerified: boolean | null;
+	createdAt: string | null;
+	hasLogin: boolean;
+}
+
+function initialsFor(name: string): string {
+	const parts = name.trim().split(/\s+/).filter(Boolean);
+	const initials = parts
+		.slice(0, 2)
+		.map((p) => p[0]!.toUpperCase())
+		.join('');
+	return initials || 'U';
+}
 
 /**
  * Postgres/Drizzle implementation of the Repository contract. Activated when
@@ -544,16 +566,87 @@ export class PostgresRepository implements Repository {
 			lastUpdated: r.updatedAt.toISOString()
 		}));
 	}
-	async listUsers(): Promise<User[]> {
-		const rows = await this.db.select().from(schema.users).where(eq(schema.users.orgId, this.orgId));
-		return rows.map((r) => ({
-			id: r.id,
-			name: r.name,
-			email: r.email,
-			role: r.role as User['role'],
-			initials: r.initials,
-			lastActive: r.lastActiveAt.toISOString()
-		}));
+	/**
+	 * Real user directory (B4): app `users` rows enriched with their better-auth
+	 * account (matched by email — signup hooks keep ids aligned for new users),
+	 * plus any better-auth signups that predate the mirroring hooks. Nothing is
+	 * fabricated: status/verified/created/last-active are actual column values,
+	 * and rows without a login account say so via hasLogin=false.
+	 */
+	async listUsers(): Promise<DirectoryUser[]> {
+		const appRows = await this.db
+			.select()
+			.from(schema.users)
+			.where(eq(schema.users.orgId, this.orgId));
+
+		type AuthRow = {
+			id: string;
+			name: string;
+			email: string;
+			emailVerified: boolean;
+			createdAt: Date;
+			role: string | null;
+			banned: boolean | null;
+			lastSeenAt: Date | string | null;
+		};
+		let authRows: AuthRow[] = [];
+		try {
+			authRows = await this.db
+				.select({
+					id: schema.user.id,
+					name: schema.user.name,
+					email: schema.user.email,
+					emailVerified: schema.user.emailVerified,
+					createdAt: schema.user.createdAt,
+					role: schema.user.role,
+					banned: schema.user.banned,
+					// Most recent session touch — cheap via session_userId_idx.
+					lastSeenAt: sql<
+						Date | string | null
+					>`(select max(s.updated_at) from session s where s.user_id = ${schema.user.id})`
+				})
+				.from(schema.user);
+		} catch {
+			// better-auth tables not migrated on this deployment — app rows only.
+		}
+
+		const byEmail = new Map(authRows.map((a) => [a.email.toLowerCase(), a]));
+		const merged = new Set<string>();
+		const items: DirectoryUser[] = appRows.map((r) => {
+			const a = byEmail.get(r.email.toLowerCase());
+			if (a) merged.add(a.email.toLowerCase());
+			const lastSeen = a?.lastSeenAt ? new Date(a.lastSeenAt) : null;
+			return {
+				id: r.id,
+				name: r.name,
+				email: r.email,
+				role: r.role as User['role'],
+				initials: r.initials || initialsFor(r.name),
+				lastActive: (lastSeen ?? r.lastActiveAt).toISOString(),
+				status: a?.banned || r.status === 'suspended' ? 'suspended' : 'active',
+				emailVerified: a ? a.emailVerified : null,
+				createdAt: a ? a.createdAt.toISOString() : null,
+				hasLogin: Boolean(a)
+			};
+		});
+		// Signups that predate the auth-config mirroring hooks (or whose mirror
+		// insert failed): surface them too — they are the *real* accounts.
+		for (const a of authRows) {
+			if (merged.has(a.email.toLowerCase())) continue;
+			items.push({
+				id: a.id,
+				name: a.name || a.email,
+				email: a.email,
+				role: normalizeAppRole(a.role),
+				initials: initialsFor(a.name || a.email),
+				lastActive: a.lastSeenAt ? new Date(a.lastSeenAt).toISOString() : '',
+				status: a.banned ? 'suspended' : 'active',
+				emailVerified: a.emailVerified,
+				createdAt: a.createdAt.toISOString(),
+				hasLogin: true
+			});
+		}
+		return items.sort((x, y) => x.name.localeCompare(y.name));
 	}
 
 	async listNotifications(): Promise<Notification[]> {

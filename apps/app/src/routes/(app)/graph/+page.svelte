@@ -10,21 +10,51 @@
 		X,
 		GitMerge,
 		Activity,
-		Loader2
+		Loader2,
+		Layers,
+		TrendingUp,
+		Link2,
+		ChevronDown
 	} from '@lucide/svelte';
 	import { api } from '$lib/api';
 	import { cn } from '$lib/utils';
 	import type { GraphNode, GraphEdge } from '@insightlibrary/schemas';
 
 	const graph = createQuery({ queryKey: ['graph'], queryFn: () => api.getGraph() });
+	// GraphRAG communities (connected components) — powers the subgraph toggle
+	// and the Communities panel.
+	const communities = createQuery({
+		queryKey: ['graph-communities'],
+		queryFn: () => api.listGraphCommunities()
+	});
+	// PageRank centrality — "Top Concepts" list in the side panel.
+	const pagerank = createQuery({
+		queryKey: ['graph-pagerank'],
+		queryFn: () => api.getGraphPageRank()
+	});
 
-	// ── View controls (client-side, deterministic) ────────────────────────────
-	const subgraphs = ["Addison's Subgraph", 'USMLE Step 1', 'Global'] as const;
-	let activeSubgraph = $state<(typeof subgraphs)[number]>(subgraphs[0]);
+	// ── View controls ──────────────────────────────────────────────────────────
+	let activeCommunityId = $state<string | null>(null); // null = full graph
+	let showCommunities = $state(false);
 	let zoom = $state(1);
+	let pan = $state({ x: 0, y: 0 });
 	let selectedId = $state<string | null>(null);
 	let activeGroups = $state<Set<string>>(new Set());
 	let showFilter = $state(false);
+
+	const activeCommunity = $derived(
+		($communities.data ?? []).find((c) => c.id === activeCommunityId) ?? null
+	);
+	const communityNodeSet = $derived(activeCommunity ? new Set(activeCommunity.nodeIds) : null);
+
+	function selectCommunity(id: string | null) {
+		activeCommunityId = id;
+		showCommunities = false;
+		if (id) {
+			const set = new Set(($communities.data ?? []).find((c) => c.id === id)?.nodeIds ?? []);
+			if (selectedId && !set.has(selectedId)) selectedId = null;
+		}
+	}
 
 	// Visual metadata per node group. Central "Disease" node anchors the radial layout.
 	const groupMeta: Record<
@@ -80,25 +110,25 @@
 		);
 	}
 
-	const legend = $derived.by(() => {
-		const seen = new Map<string, number>();
-		for (const n of $graph.data?.nodes ?? []) seen.set(n.group, (seen.get(n.group) ?? 0) + 1);
-		// Keep a stable, meaningful order matching the prototype legend.
-		const order = ['Disease', 'Anatomy', 'Hormone', 'Symptom', 'Etiology'];
-		const groups = [...seen.keys()].sort((a, b) => {
-			const ai = order.indexOf(a);
-			const bi = order.indexOf(b);
-			return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-		});
-		return groups.map((g) => ({ group: g, count: seen.get(g) ?? 0, ...meta(g) }));
-	});
+	const nodeById = $derived(new Map(($graph.data?.nodes ?? []).map((n) => [n.id, n])));
+
+	function displayName(id: string): string {
+		const n = nodeById.get(id);
+		return n?.label || id;
+	}
 
 	// ── Deterministic radial layout ────────────────────────────────────────────
 	// Nodes with the highest degree (most edges) anchor to the centre; the rest
 	// fan out evenly on a circle by their index. No randomness, no external lib.
+	// When a community subgraph is active, the dataset is filtered to its nodes
+	// before layout so the community truly re-shapes the canvas.
 	const layout = $derived.by(() => {
-		const nodes = $graph.data?.nodes ?? [];
-		const edges = $graph.data?.edges ?? [];
+		let nodes = $graph.data?.nodes ?? [];
+		let edges = $graph.data?.edges ?? [];
+		if (communityNodeSet) {
+			nodes = nodes.filter((n) => communityNodeSet.has(n.id));
+			edges = edges.filter((e) => communityNodeSet.has(e.source) && communityNodeSet.has(e.target));
+		}
 		if (nodes.length === 0) return { pos: new Map<string, { x: number; y: number }>(), nodes, edges };
 
 		const degree = new Map<string, number>();
@@ -137,6 +167,19 @@
 		return { pos, nodes, edges };
 	});
 
+	const legend = $derived.by(() => {
+		const seen = new Map<string, number>();
+		for (const n of layout.nodes) seen.set(n.group, (seen.get(n.group) ?? 0) + 1);
+		// Keep a stable, meaningful order matching the prototype legend.
+		const order = ['Disease', 'Anatomy', 'Hormone', 'Symptom', 'Etiology'];
+		const groups = [...seen.keys()].sort((a, b) => {
+			const ai = order.indexOf(a);
+			const bi = order.indexOf(b);
+			return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+		});
+		return groups.map((g) => ({ group: g, count: seen.get(g) ?? 0, ...meta(g) }));
+	});
+
 	function visible(group: string): boolean {
 		return activeGroups.size === 0 || activeGroups.has(group);
 	}
@@ -148,8 +191,6 @@
 		activeGroups = next;
 	}
 
-	const nodeById = $derived(new Map(($graph.data?.nodes ?? []).map((n) => [n.id, n])));
-
 	const selectedNode = $derived<GraphNode | null>(
 		selectedId ? (nodeById.get(selectedId) ?? null) : null
 	);
@@ -157,7 +198,7 @@
 	const selectedEdges = $derived.by<Array<GraphEdge & { dir: 'out' | 'in'; other: string }>>(() => {
 		if (!selectedId) return [];
 		const out: Array<GraphEdge & { dir: 'out' | 'in'; other: string }> = [];
-		for (const e of $graph.data?.edges ?? []) {
+		for (const e of layout.edges) {
 			if (e.source === selectedId) out.push({ ...e, dir: 'out', other: e.target });
 			else if (e.target === selectedId) out.push({ ...e, dir: 'in', other: e.source });
 		}
@@ -182,9 +223,50 @@
 		selectedId = selectedId === id ? null : id;
 	}
 
-	const zoomIn = () => (zoom = Math.min(2, +(zoom + 0.2).toFixed(2)));
-	const zoomOut = () => (zoom = Math.max(0.5, +(zoom - 0.2).toFixed(2)));
-	const resetZoom = () => (zoom = 1);
+	/** Select a node from a list (Top Concepts) — drop any community filter hiding it. */
+	function jumpTo(id: string) {
+		if (communityNodeSet && !communityNodeSet.has(id)) activeCommunityId = null;
+		selectedId = id;
+	}
+
+	// ── Zoom + pan (real canvas transform) ─────────────────────────────────────
+	const MIN_ZOOM = 0.5;
+	const MAX_ZOOM = 2.5;
+	const clampZoom = (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, +z.toFixed(2)));
+	const zoomIn = () => (zoom = clampZoom(zoom + 0.2));
+	const zoomOut = () => (zoom = clampZoom(zoom - 0.2));
+	const resetView = () => {
+		zoom = 1;
+		pan = { x: 0, y: 0 };
+	};
+
+	let dragging = $state(false);
+	let dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
+
+	function onPointerDown(e: PointerEvent) {
+		// Don't hijack clicks on nodes/controls — only pan from the background.
+		if ((e.target as HTMLElement).closest('button, a')) return;
+		dragging = true;
+		dragStart = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+	}
+	function onPointerMove(e: PointerEvent) {
+		if (!dragging) return;
+		pan = { x: dragStart.panX + (e.clientX - dragStart.x), y: dragStart.panY + (e.clientY - dragStart.y) };
+	}
+	function onPointerUp() {
+		dragging = false;
+	}
+	/** Non-passive wheel listener (Svelte registers onwheel as passive, which
+	 * would ignore preventDefault and scroll the page while zooming). */
+	function wheelZoom(el: HTMLElement) {
+		const handler = (e: WheelEvent) => {
+			e.preventDefault();
+			zoom = clampZoom(zoom * (e.deltaY < 0 ? 1.1 : 0.9));
+		};
+		el.addEventListener('wheel', handler, { passive: false });
+		return { destroy: () => el.removeEventListener('wheel', handler) };
+	}
 </script>
 
 <div class="flex h-full w-full flex-col">
@@ -194,19 +276,75 @@
 	>
 		<div class="flex items-center gap-3">
 			<div class="flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 p-1">
-				{#each subgraphs as sub (sub)}
+				<button
+					onclick={() => selectCommunity(null)}
+					class={cn(
+						'rounded px-3 py-1 text-xs font-medium transition-colors',
+						activeCommunityId === null
+							? 'bg-zinc-800 text-zinc-200 shadow-sm'
+							: 'text-zinc-500 hover:text-zinc-300'
+					)}
+				>
+					Full Graph
+				</button>
+				<div class="relative">
 					<button
-						onclick={() => (activeSubgraph = sub)}
+						onclick={() => (showCommunities = !showCommunities)}
 						class={cn(
-							'rounded px-3 py-1 text-xs font-medium transition-colors',
-							activeSubgraph === sub
-								? 'bg-zinc-800 text-zinc-200 shadow-sm'
+							'flex items-center gap-1.5 rounded px-3 py-1 text-xs font-medium transition-colors',
+							activeCommunityId !== null
+								? 'bg-indigo-500/15 text-indigo-300 shadow-sm'
 								: 'text-zinc-500 hover:text-zinc-300'
 						)}
 					>
-						{sub}
+						<Layers class="h-3.5 w-3.5" />
+						{#if activeCommunity}
+							<span class="max-w-[10rem] truncate">{activeCommunity.label}</span>
+						{:else}
+							Communities
+							{#if $communities.data}
+								<span class="font-mono text-[10px] text-zinc-500">{$communities.data.length}</span>
+							{/if}
+						{/if}
+						<ChevronDown class="h-3 w-3 opacity-60" />
 					</button>
-				{/each}
+					{#if showCommunities}
+						<div
+							class="glass-panel absolute top-9 left-0 z-30 max-h-80 w-64 space-y-1 overflow-y-auto rounded-xl border border-zinc-800 p-2"
+							transition:fly={{ y: -6, duration: 150 }}
+						>
+							<p class="px-2 py-1 text-[10px] font-semibold tracking-wider text-zinc-500 uppercase">
+								GraphRAG communities
+							</p>
+							{#if $communities.isLoading}
+								<div class="flex items-center gap-2 px-2 py-2 text-xs text-zinc-500">
+									<Loader2 class="h-3.5 w-3.5 animate-spin" /> Detecting communities…
+								</div>
+							{:else if $communities.isError}
+								<p class="px-2 py-2 text-xs text-rose-400">Failed to load communities.</p>
+							{:else}
+								{#each $communities.data ?? [] as c (c.id)}
+									<button
+										onclick={() => selectCommunity(activeCommunityId === c.id ? null : c.id)}
+										class={cn(
+											'flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors',
+											activeCommunityId === c.id
+												? 'bg-indigo-500/10 text-indigo-300'
+												: 'text-zinc-300 hover:bg-zinc-800/70'
+										)}
+									>
+										<span class="truncate">{c.label}</span>
+										<span class="shrink-0 font-mono text-[10px] text-zinc-500">{c.size} nodes</span>
+									</button>
+								{:else}
+									<p class="px-2 py-2 text-xs text-zinc-600">
+										No communities detected yet — the graph may still be empty.
+									</p>
+								{/each}
+							{/if}
+						</div>
+					{/if}
+				</div>
 			</div>
 		</div>
 
@@ -264,19 +402,21 @@
 			<button
 				onclick={zoomOut}
 				title="Zoom out"
-				class="rounded-l border border-zinc-800 bg-zinc-950 p-2 text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
+				disabled={zoom <= MIN_ZOOM}
+				class="rounded-l border border-zinc-800 bg-zinc-950 p-2 text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
 			>
 				<ZoomOut class="h-4 w-4" />
 			</button>
 			<button
 				onclick={zoomIn}
 				title="Zoom in"
-				class="border-y border-zinc-800 bg-zinc-950 p-2 text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
+				disabled={zoom >= MAX_ZOOM}
+				class="border-y border-zinc-800 bg-zinc-950 p-2 text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
 			>
 				<ZoomIn class="h-4 w-4" />
 			</button>
 			<button
-				onclick={resetZoom}
+				onclick={resetView}
 				title="Reset view"
 				class="rounded-r border border-zinc-800 bg-zinc-950 p-2 text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-zinc-200"
 			>
@@ -288,18 +428,29 @@
 	<!-- Canvas + side panel -->
 	<div class="relative flex min-h-0 flex-1">
 		<!-- Graph Visualization Canvas -->
-		<div class="relative flex-1 overflow-hidden bg-[#09090b]">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			class={cn('relative flex-1 overflow-hidden bg-[#09090b]', dragging ? 'cursor-grabbing' : 'cursor-grab')}
+			onpointerdown={onPointerDown}
+			onpointermove={onPointerMove}
+			onpointerup={onPointerUp}
+			onpointercancel={onPointerUp}
+			use:wheelZoom
+		>
 			<!-- Background dot pattern -->
 			<div
 				class="pointer-events-none absolute inset-0 opacity-[0.03]"
 				style="background-image: radial-gradient(#fff 1px, transparent 1px); background-size: 24px 24px;"
 			></div>
 
-			<!-- Zoom / reset badge -->
+			<!-- Zoom / subgraph badge -->
 			<div
 				class="absolute top-4 left-4 z-10 rounded-md border border-zinc-800 bg-zinc-950/70 px-2.5 py-1 font-mono text-[10px] text-zinc-500"
 			>
 				zoom {(zoom * 100).toFixed(0)}%
+				{#if activeCommunity}
+					· {activeCommunity.label} ({layout.nodes.length}/{$graph.data?.nodes.length ?? 0} nodes)
+				{/if}
 			</div>
 
 			<!-- Legend -->
@@ -361,8 +512,11 @@
 				<!-- Interactive graph area -->
 				<div class="absolute inset-0 flex items-center justify-center">
 					<div
-						class="relative aspect-video w-full max-w-4xl transition-transform duration-200"
-						style="transform: scale({zoom});"
+						class={cn(
+							'relative aspect-video w-full max-w-4xl',
+							dragging ? '' : 'transition-transform duration-200'
+						)}
+						style="transform: translate({pan.x}px, {pan.y}px) scale({zoom});"
 					>
 						<!-- Edges -->
 						<svg class="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
@@ -439,7 +593,7 @@
 												: 'text-zinc-300 opacity-80 group-hover:opacity-100'
 										)}
 									>
-										{node.id}
+										{node.label || node.id}
 									</span>
 								</button>
 							{/if}
@@ -467,7 +621,9 @@
 							<Network class="h-5 w-5 opacity-80" />
 						</div>
 						<div>
-							<h3 class="text-sm font-semibold text-zinc-100">{selectedNode.id}</h3>
+							<h3 class="text-sm font-semibold text-zinc-100">
+								{selectedNode.label || selectedNode.id}
+							</h3>
 							<span class={cn('text-xs font-medium', m.text)}>{selectedNode.group}</span>
 						</div>
 					</div>
@@ -497,6 +653,26 @@
 						</div>
 					</div>
 
+					<!-- Ontology grounding (populated by the refinery when the node links) -->
+					{#if selectedNode.canonicalConceptId || selectedNode.description}
+						<div>
+							<h4 class="mb-2 text-[10px] font-semibold tracking-wider text-zinc-500 uppercase">
+								Ontology Concept
+							</h4>
+							{#if selectedNode.canonicalConceptId}
+								<div
+									class="mb-2 inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 font-mono text-[10px] text-emerald-300"
+								>
+									<Link2 class="h-3 w-3" />
+									{selectedNode.canonicalConceptId}
+								</div>
+							{/if}
+							{#if selectedNode.description}
+								<p class="text-xs leading-relaxed text-zinc-400">{selectedNode.description}</p>
+							{/if}
+						</div>
+					{/if}
+
 					<!-- Connected relationships -->
 					<div>
 						<h4 class="mb-2 text-[10px] font-semibold tracking-wider text-zinc-500 uppercase">
@@ -511,7 +687,7 @@
 								>
 									<span class={cn('h-2 w-2 shrink-0 rounded-full', om.dot.split(' ')[0])}></span>
 									<div class="min-w-0 flex-1">
-										<p class="truncate text-xs font-medium text-zinc-200">{e.other}</p>
+										<p class="truncate text-xs font-medium text-zinc-200">{displayName(e.other)}</p>
 										<p class="font-mono text-[10px] text-zinc-500">
 											{e.dir === 'out' ? '→' : '←'}
 											{e.label}
@@ -543,24 +719,54 @@
 				</div>
 
 				<div class="border-t border-zinc-800 px-5 py-3">
-					<p class="font-mono text-[10px] text-zinc-600">
-						node_id: {selectedNode.id.toLowerCase().replace(/\s+/g, '_')}
-					</p>
+					<p class="font-mono text-[10px] text-zinc-600">node_id: {selectedNode.id}</p>
 				</div>
 			</aside>
 		{:else if !$graph.isLoading && layout.nodes.length > 0}
-			<!-- Idle hint panel -->
+			<!-- Idle panel: PageRank Top Concepts + hint -->
 			<aside
-				class="relative z-10 hidden w-80 shrink-0 flex-col items-center justify-center gap-3 border-l border-zinc-800 bg-zinc-950/40 px-6 text-center lg:flex"
+				class="relative z-10 hidden w-80 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950/40 lg:flex"
 				in:fade={{ duration: 150 }}
 			>
-				<div class="rounded-full border border-zinc-800 bg-zinc-900/60 p-3">
-					<Network class="h-6 w-6 text-zinc-600" />
+				<div class="border-b border-zinc-800 px-5 py-4">
+					<h3 class="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+						<TrendingUp class="h-4 w-4 text-indigo-400" />
+						Top Concepts
+					</h3>
+					<p class="mt-0.5 text-[11px] text-zinc-500">Most central entities by PageRank</p>
 				</div>
-				<p class="text-sm text-zinc-400">Select a node</p>
-				<p class="max-w-[16rem] text-xs text-zinc-600">
-					Click any entity in the graph to inspect its group, weight, and relationships.
-				</p>
+				<div class="flex-1 space-y-1.5 overflow-y-auto px-4 py-4">
+					{#if $pagerank.isLoading}
+						<div class="flex items-center gap-2 px-1 py-2 text-xs text-zinc-500">
+							<Loader2 class="h-3.5 w-3.5 animate-spin" /> Ranking concepts…
+						</div>
+					{:else if $pagerank.isError}
+						<p class="px-1 py-2 text-xs text-rose-400">Failed to compute PageRank.</p>
+					{:else}
+						{#each ($pagerank.data ?? []).slice(0, 12) as item, i (item.id)}
+							<button
+								onclick={() => jumpTo(item.id)}
+								class="flex w-full items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-left transition-colors hover:border-indigo-500/40 hover:bg-zinc-900"
+							>
+								<span class="w-5 shrink-0 text-right font-mono text-[10px] text-zinc-600">{i + 1}</span>
+								<span class="min-w-0 flex-1 truncate text-xs font-medium text-zinc-200">
+									{item.label}
+								</span>
+								<span class="shrink-0 font-mono text-[10px] text-indigo-400">
+									{item.score.toFixed(3)}
+								</span>
+							</button>
+						{:else}
+							<p class="px-1 py-2 text-xs text-zinc-600">No ranked concepts yet.</p>
+						{/each}
+					{/if}
+				</div>
+				<div class="border-t border-zinc-800 px-5 py-3">
+					<p class="text-[11px] text-zinc-600">
+						Click a concept or any node in the canvas to inspect its relationships. Drag to pan,
+						scroll to zoom.
+					</p>
+				</div>
 			</aside>
 		{/if}
 	</div>

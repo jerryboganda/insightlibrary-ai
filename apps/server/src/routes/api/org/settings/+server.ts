@@ -63,7 +63,10 @@ const settingsPatchSchema = z
 		searchTopK: nullableInt(1, 100),
 		searchSnippetLength: nullableInt(80, 2000),
 		copilotPromptOverrides: z.record(z.string(), z.string().max(4000)).nullable(),
-		sourcePriorityOrder: z.array(z.string().min(1).max(200)).max(100).nullable()
+		sourcePriorityOrder: z.array(z.string().min(1).max(200)).max(100).nullable(),
+		// FinOps budget (C6) — enforced by the AI provider router (usage/metering.ts).
+		budgetMonthlyLimitUsd: nullableNum(0, 10_000_000),
+		budgetSoftThresholdPct: nullableNum(0, 100)
 	})
 	.partial();
 

@@ -96,6 +96,8 @@ export const newClaimSchema = z.object({
 export type NewClaim = z.infer<typeof newClaimSchema>;
 
 // ── Multi-provider LLM management ───────────────────────────────────────────
+// Chat/LLM providers plus non-LLM vendor keys (cohere/jina rerank, llamaparse
+// external parsing) managed through the same encrypted store.
 export const providerIdSchema = z.enum([
 	'gemini',
 	'anthropic',
@@ -103,7 +105,10 @@ export const providerIdSchema = z.enum([
 	'moonshot',
 	'deepseek',
 	'minimax',
-	'openai-compatible'
+	'openai-compatible',
+	'cohere',
+	'jina',
+	'llamaparse'
 ]);
 export type ProviderId = z.infer<typeof providerIdSchema>;
 
@@ -111,6 +116,8 @@ export type ProviderId = z.infer<typeof providerIdSchema>;
 export const providerInfoSchema = z.object({
 	id: providerIdSchema,
 	label: z.string(),
+	/** 'chat' = routable LLM provider; 'vendor' = service key (rerank/parsing). */
+	kind: z.enum(['chat', 'vendor']).optional(),
 	/** A server-side env key is present. */
 	envConfigured: z.boolean(),
 	/** An org/user key is stored in the DB. */
@@ -124,9 +131,31 @@ export type ProviderInfo = z.infer<typeof providerInfoSchema>;
 export const aiProvidersResponseSchema = z.object({
 	providers: z.array(providerInfoSchema),
 	activeChatProvider: z.string(),
-	encryptionAvailable: z.boolean()
+	encryptionAvailable: z.boolean(),
+	/** Org routing preferences (provider_settings) — null/absent when unset. */
+	defaultProvider: z.string().nullable().optional(),
+	taskRouting: z.record(z.string(), z.string()).optional(),
+	/** Effective provider per task after org routing + env fallbacks ('mock' = none). */
+	taskProviders: z.record(z.string(), z.string()).optional(),
+	/** pgvector embeddings health (org-stored BYO key or env GEMINI_API_KEY). */
+	embeddings: z
+		.object({
+			configured: z.boolean(),
+			provider: z.string().nullable(),
+			source: z.enum(['stored', 'env']).nullable()
+		})
+		.optional()
 });
 export type AiProvidersResponse = z.infer<typeof aiProvidersResponseSchema>;
+
+/** PUT /api/ai/providers body — org default provider + per-task routing. */
+export const aiProviderSettingsInputSchema = z.object({
+	/** Provider id, or null to clear the org default. Omit to leave unchanged. */
+	defaultProvider: z.string().nullable().optional(),
+	/** Full task→provider map (replaces the stored map). Omit to leave unchanged. */
+	taskRouting: z.record(z.string(), z.string()).optional()
+});
+export type AiProviderSettingsInput = z.infer<typeof aiProviderSettingsInputSchema>;
 
 export const aiKeyInputSchema = z.object({
 	provider: providerIdSchema,

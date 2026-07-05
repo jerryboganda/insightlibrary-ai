@@ -1,4 +1,5 @@
 import { createAuthClient } from 'better-auth/svelte';
+import { adminClient, organizationClient } from 'better-auth/client/plugins';
 import { getPlatform, isTauri } from '$lib/platform';
 
 /**
@@ -18,6 +19,10 @@ export const SESSION_TOKEN_KEY = 'session_token';
 
 export const authClient = createAuthClient({
 	baseURL: API_BASE,
+	// Typed client mirrors of the server's organization + admin plugins
+	// (auth-config.ts), so invitation/session-management flows can call
+	// authClient.organization.* / authClient.admin.* directly when needed.
+	plugins: [organizationClient(), adminClient()],
 	fetchOptions: {
 		onSuccess: async (ctx) => {
 			if (!isTauri()) return;

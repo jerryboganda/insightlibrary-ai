@@ -109,6 +109,30 @@ export const PROVIDERS: Record<ProviderMeta['id'], ProviderMeta> = {
 
 export type ConfigurableProvider = ProviderMeta['id'];
 
+/**
+ * Non-LLM vendor services whose API keys are admin-manageable through the same
+ * encrypted store (provider_keys / POST /api/ai/keys). These never route chat —
+ * they are consumed by rerank (cohere/jina) and external parsing (llamaparse)
+ * via credentials.resolveVendorKey(), with the env var as fallback.
+ */
+export interface VendorMeta {
+	id: 'cohere' | 'jina' | 'llamaparse';
+	label: string;
+	keyEnv: string;
+}
+
+export const VENDOR_KEYS: Record<VendorMeta['id'], VendorMeta> = {
+	cohere: { id: 'cohere', label: 'Cohere (rerank)', keyEnv: 'COHERE_API_KEY' },
+	jina: { id: 'jina', label: 'Jina AI (rerank)', keyEnv: 'JINA_API_KEY' },
+	llamaparse: { id: 'llamaparse', label: 'LlamaParse (external parsing)', keyEnv: 'LLAMAPARSE_API_KEY' }
+};
+
+export type VendorId = VendorMeta['id'];
+
+export function isVendorId(id: string): id is VendorId {
+	return id in VENDOR_KEYS;
+}
+
 /** Ordered fallback list of providers to try for chat when the default has no key. */
 export const CHAT_FALLBACK_ORDER: ConfigurableProvider[] = [
 	'gemini',

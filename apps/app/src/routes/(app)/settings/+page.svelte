@@ -1,106 +1,146 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import {
-		Settings2,
 		Key,
-		Users,
-		HardDrive,
-		Cpu,
-		CreditCard,
 		Shield,
-		Info
+		Settings2,
+		MonitorSmartphone,
+		Check,
+		Trash2,
+		ExternalLink,
+		LogOut,
+		AlertTriangle
 	} from '@lucide/svelte';
 	import { fade, fly } from 'svelte/transition';
 	import type { Component } from 'svelte';
 	import { cn } from '$lib/utils';
 	import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
 	import { api } from '$lib/api';
+	import { authClient } from '$lib/auth-client';
+	import { Skeleton } from '$lib/components/ui';
+	import type { AiKeyInput, ProviderId } from '@insightlibrary/schemas';
 
+	let activeTab = $state('My AI Keys');
+
+	const tabs: { icon: Component; label: string }[] = [
+		{ icon: Key, label: 'My AI Keys' },
+		{ icon: Shield, label: 'Sessions & Security' },
+		{ icon: Settings2, label: 'Workspace Settings' }
+	];
+
+	// ── My AI Keys (personal BYO keys, scope 'user') ───────────────────────────
 	const queryClient = useQueryClient();
+	const providers = createQuery({ queryKey: ['ai-providers'], queryFn: () => api.getAiProviders() });
+	const invalidateProviders = () => queryClient.invalidateQueries({ queryKey: ['ai-providers'] });
 
-	// Load persisted preferences to seed the form (best-effort).
-	const prefsQuery = createQuery({
-		queryKey: ['preferences'],
-		queryFn: () => api.getPreferences()
+	const chatProviders = $derived(($providers.data?.providers ?? []).filter((p) => p.kind !== 'vendor'));
+
+	const saveKeyMut = createMutation({
+		mutationFn: (v: AiKeyInput) => api.saveAiKey(v),
+		onSuccess: invalidateProviders
+	});
+	const deleteKeyMut = createMutation({
+		mutationFn: (p: ProviderId) => api.deleteAiKey(p, 'user'),
+		onSuccess: invalidateProviders
 	});
 
-	// Persist the current form state via the preferences endpoint. A single
-	// mutation backs both "Save Configuration" and "Save Policy" — each passes
-	// the slice of state it owns.
-	let savedNotice = $state('');
-	let savedTimer: ReturnType<typeof setTimeout> | undefined;
-	const savePrefs = createMutation({
-		mutationFn: (prefs: Record<string, unknown>) => api.savePreferences(prefs),
-		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ['preferences'] });
-			savedNotice = 'Saved';
-			clearTimeout(savedTimer);
-			savedTimer = setTimeout(() => (savedNotice = ''), 3000);
+	let drafts = $state<Record<string, string>>({});
+	function savePersonalKey(id: ProviderId) {
+		const key = drafts[id]?.trim();
+		if (!key) return;
+		$saveKeyMut.mutate({ provider: id, apiKey: key, scope: 'user' });
+		drafts[id] = '';
+	}
+
+	// ── Active sessions (better-auth core session management) ─────────────────
+	type SessionRow = {
+		id: string;
+		token: string;
+		createdAt: string | Date;
+		expiresAt: string | Date;
+		ipAddress?: string | null;
+		userAgent?: string | null;
+	};
+	let sessions = $state<SessionRow[]>([]);
+	let currentToken = $state<string | null>(null);
+	let sessionsLoading = $state(true);
+	let sessionsError = $state('');
+	let sessionsBusy = $state(false);
+
+	async function loadSessions() {
+		sessionsLoading = true;
+		sessionsError = '';
+		try {
+			const [list, current] = await Promise.all([authClient.listSessions(), authClient.getSession()]);
+			if (list.error) throw new Error(list.error.message ?? 'Failed to list sessions');
+			sessions = (list.data ?? []) as SessionRow[];
+			currentToken = current.data?.session?.token ?? null;
+		} catch (e) {
+			sessions = [];
+			sessionsError = e instanceof Error ? e.message : 'Session management is unavailable on this server.';
+		} finally {
+			sessionsLoading = false;
 		}
-	});
+	}
+	onMount(loadSessions);
 
-	// Seed local form state from persisted preferences when they load.
-	$effect(() => {
-		const p = $prefsQuery.data;
-		if (!p) return;
-		if (typeof p.deltaExtraction === 'boolean') pipeline.deltaExtraction = p.deltaExtraction;
-		if (typeof p.strictCitation === 'boolean') pipeline.strictCitation = p.strictCitation;
-		if (typeof p.graphCommunity === 'boolean') pipeline.graphCommunity = p.graphCommunity;
-		if (typeof p.embeddingModel === 'string') embeddingModel = p.embeddingModel;
-		if (typeof p.extractionModel === 'string') extractionModel = p.extractionModel;
-		if (typeof p.synthesisModel === 'string') synthesisModel = p.synthesisModel;
-	});
-
-	function saveConfiguration() {
-		$savePrefs.mutate({
-			deltaExtraction: pipeline.deltaExtraction,
-			strictCitation: pipeline.strictCitation,
-			graphCommunity: pipeline.graphCommunity,
-			embeddingModel,
-			extractionModel,
-			synthesisModel
-		});
+	async function revokeSession(token: string) {
+		sessionsBusy = true;
+		try {
+			await authClient.revokeSession({ token });
+			await loadSessions();
+		} finally {
+			sessionsBusy = false;
+		}
+	}
+	async function revokeOthers() {
+		sessionsBusy = true;
+		try {
+			await authClient.revokeOtherSessions();
+			await loadSessions();
+		} finally {
+			sessionsBusy = false;
+		}
 	}
 
-	function savePolicy() {
-		$savePrefs.mutate({ sourcePriority });
+	/** Human-ish device label from a raw user agent. */
+	function deviceLabel(ua: string | null | undefined): string {
+		if (!ua) return 'Unknown device';
+		const browser = /Edg\//.test(ua)
+			? 'Edge'
+			: /Chrome\//.test(ua)
+				? 'Chrome'
+				: /Firefox\//.test(ua)
+					? 'Firefox'
+					: /Safari\//.test(ua)
+						? 'Safari'
+						: /Tauri|wry/i.test(ua)
+							? 'Desktop app'
+							: 'Browser';
+		const os = /Windows/.test(ua)
+			? 'Windows'
+			: /Mac OS X|Macintosh/.test(ua)
+				? 'macOS'
+				: /Android/.test(ua)
+					? 'Android'
+					: /iPhone|iPad|iOS/.test(ua)
+						? 'iOS'
+						: /Linux/.test(ua)
+							? 'Linux'
+							: '';
+		return os ? `${browser} · ${os}` : browser;
 	}
+	const fmtDate = (d: string | Date) => new Date(d).toLocaleString();
 
-	// Prototype-only settings (no API endpoint) — all form state is local.
-	let activeTab = $state('General');
-
-	const configTabs: { icon: Component; label: string }[] = [
-		{ icon: Settings2, label: 'General' },
-		{ icon: Users, label: 'Users & Roles' },
-		{ icon: Shield, label: 'Governance & Review' },
-		{ icon: Key, label: 'API Keys & Integrations' }
-	];
-
-	const healthTabs: { icon: Component; label: string }[] = [
-		{ icon: Cpu, label: 'AI Usage / FinOps' },
-		{ icon: HardDrive, label: 'Storage & Indices' },
-		{ icon: CreditCard, label: 'Billing' }
-	];
-
-	// Processing pipeline toggles
-	const pipeline = $state({
-		deltaExtraction: true,
-		strictCitation: true,
-		graphCommunity: true
-	});
-
-	// AI model routing selections
-	let embeddingModel = $state('text-embedding-004 (Default)');
-	let extractionModel = $state('gemini-1.5-flash (Optimized speed)');
-	let synthesisModel = $state('gemini-1.5-pro (Recommended)');
-
-	const sourcePriority = [
-		'1. Official Clinical Guideline',
-		'2. Latest Textbook Edition',
-		'3. Core Textbook',
-		'4. Board Review Book',
-		'5. Lecture Notes',
-		'6. User Notes',
-		'7. Unknown PDF'
+	// ── Workspace settings deep links (org-level config lives in Admin) ───────
+	const adminLinks: { label: string; description: string; href: string }[] = [
+		{ label: 'Users & Roles', description: 'Invite members, assign roles', href: '/admin/users' },
+		{ label: 'API Keys & Integrations', description: 'Workspace API keys and webhooks', href: '/admin/settings/integrations' },
+		{ label: 'AI Providers & Routing', description: 'Workspace AI keys, model routing', href: '/admin/settings/ai' },
+		{ label: 'Governance & Review', description: 'Refinery thresholds, review policy', href: '/admin/settings/governance' },
+		{ label: 'AI Usage / FinOps', description: 'Spend, metering, budget limits', href: '/admin/settings/finops' },
+		{ label: 'Storage & Indices', description: 'Vector index, object storage', href: '/admin/settings/storage' },
+		{ label: 'Billing', description: 'Plan and payment', href: '/admin/settings/billing' }
 	];
 </script>
 
@@ -109,28 +149,9 @@
 		<!-- Settings Nav -->
 		<aside class="w-full shrink-0 space-y-1 md:w-64">
 			<h2 class="mb-3 px-3 text-xs font-semibold tracking-wider text-zinc-500 uppercase">
-				Configuration
+				My Settings
 			</h2>
-			{#each configTabs as item (item.label)}
-				{@const Icon = item.icon}
-				<button
-					onclick={() => (activeTab = item.label)}
-					class={cn(
-						'flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-						activeTab === item.label
-							? 'bg-indigo-500/10 text-indigo-300'
-							: 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
-					)}
-				>
-					<Icon class="h-4 w-4" />
-					{item.label}
-				</button>
-			{/each}
-
-			<h2 class="mt-8 mb-3 px-3 text-xs font-semibold tracking-wider text-zinc-500 uppercase">
-				System Health
-			</h2>
-			{#each healthTabs as item (item.label)}
+			{#each tabs as item (item.label)}
 				{@const Icon = item.icon}
 				<button
 					onclick={() => (activeTab = item.label)}
@@ -149,191 +170,186 @@
 
 		<!-- Settings Content -->
 		<div class="flex-1 space-y-6">
-			{#if activeTab === 'General'}
+			{#if activeTab === 'My AI Keys'}
 				<div
 					class="overflow-hidden rounded-xl border border-zinc-800 glass-panel"
 					in:fly={{ y: 8, duration: 300 }}
 				>
 					<div class="border-b border-zinc-800 bg-zinc-900/50 px-6 py-4">
-						<h2 class="text-lg font-semibold text-zinc-200">Processing Pipeline</h2>
+						<h2 class="text-lg font-semibold text-zinc-200">Personal AI Keys</h2>
 						<p class="text-sm text-zinc-500">
-							Configure how newly uploaded documents are handled globally.
+							Bring your own API key for the copilot. Personal keys take precedence over workspace
+							keys for your requests, are encrypted at rest, and never reach the browser.
 						</p>
 					</div>
-					<div class="space-y-6 p-6">
-						{@render pipelineRow(
-							'Delta Extraction (Copilot SDK)',
-							'Automatically extract new claims, deduplicate against SSOT, and find conflicts using high-reasoning models.',
-							() => pipeline.deltaExtraction,
-							() => (pipeline.deltaExtraction = !pipeline.deltaExtraction)
-						)}
-						<div class="w-full border-t border-zinc-800"></div>
-						{@render pipelineRow(
-							'Strict Citation Verification',
-							'Reject answers or extracted claims that cannot be traced to exact PDF page boundaries or text blocks.',
-							() => pipeline.strictCitation,
-							() => (pipeline.strictCitation = !pipeline.strictCitation)
-						)}
-						<div class="w-full border-t border-zinc-800"></div>
-						{@render pipelineRow(
-							'Graph Community Extraction (GraphRAG)',
-							'Build entity-relationships simultaneously during chunking to power graph visualization and search.',
-							() => pipeline.graphCommunity,
-							() => (pipeline.graphCommunity = !pipeline.graphCommunity)
-						)}
-					</div>
-				</div>
-
-				<div
-					class="overflow-hidden rounded-xl border border-zinc-800 glass-panel"
-					in:fly={{ y: 8, duration: 300, delay: 100 }}
-				>
-					<div class="border-b border-zinc-800 bg-zinc-900/50 px-6 py-4">
-						<h2 class="text-lg font-semibold text-zinc-200">AI Model Routing</h2>
-						<p class="text-sm text-zinc-500">
-							Manage API endpoints, keys, and base models. Override Gemini defaults.
-						</p>
-					</div>
-					<div class="space-y-4 p-6">
-						<div class="space-y-2">
-							<label for="embed-model" class="text-xs font-medium text-zinc-400">Embedding Model</label>
-							<select
-								id="embed-model"
-								bind:value={embeddingModel}
-								class="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-indigo-500/50 focus:outline-none"
-							>
-								<option>text-embedding-004 (Default)</option>
-								<option>bge-large-en-v1.5</option>
-							</select>
+					{#if $providers.isLoading}
+						<div class="space-y-3 p-6">
+							{#each Array(4) as _, i (i)}
+								<Skeleton class="h-16 rounded-lg" />
+							{/each}
 						</div>
-						<div class="space-y-2">
-							<label for="extract-model" class="text-xs font-medium text-zinc-400">
-								Data Extraction / Classification Model
-							</label>
-							<select
-								id="extract-model"
-								bind:value={extractionModel}
-								class="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-indigo-500/50 focus:outline-none"
-							>
-								<option>gemini-1.5-flash (Optimized speed)</option>
-								<option>gemini-1.5-pro</option>
-							</select>
+					{:else if $providers.isError}
+						<div class="flex items-center gap-2 p-6 text-sm text-rose-300">
+							<AlertTriangle class="h-4 w-4" /> Could not load provider status.
 						</div>
-						<div class="space-y-2">
-							<label for="synth-model" class="text-xs font-medium text-zinc-400">
-								Synthesis &amp; Conflict Resolution Model
-							</label>
-							<select
-								id="synth-model"
-								bind:value={synthesisModel}
-								class="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-indigo-500/50 focus:outline-none"
-							>
-								<option>gemini-1.5-pro (Recommended)</option>
-								<option>gemini-1.5-flash</option>
-							</select>
-						</div>
-					</div>
-					<div class="flex items-center justify-end gap-3 border-t border-zinc-800 bg-zinc-900/30 p-4">
-						{#if savedNotice}
-							<span in:fade={{ duration: 150 }} class="text-sm font-medium text-emerald-400">
-								{savedNotice}
-							</span>
-						{/if}
-						<button
-							onclick={saveConfiguration}
-							disabled={$savePrefs.isPending}
-							class="rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
-						>
-							{$savePrefs.isPending ? 'Saving...' : 'Save Configuration'}
-						</button>
-					</div>
-				</div>
-			{:else if activeTab === 'Governance & Review'}
-				<div
-					class="overflow-hidden rounded-xl border border-zinc-800 glass-panel"
-					in:fly={{ y: 8, duration: 300 }}
-				>
-					<div class="border-b border-zinc-800 bg-zinc-900/50 px-6 py-4">
-						<h2 class="text-lg font-semibold text-zinc-200">Source Priority Rules</h2>
-						<p class="text-sm text-zinc-500">
-							Configure evidence hierarchy to resolve conflicts automatically before human review.
-						</p>
-					</div>
-					<div class="p-6">
-						<p class="mb-4 text-sm text-zinc-400">
-							Drag to reorder source authority. The system trusts higher sources when merging
-							contradictions.
-						</p>
-						<div class="space-y-2">
-							{#each sourcePriority as item (item)}
-								<div
-									class="flex items-center justify-between rounded border border-zinc-800 bg-zinc-900/50 p-3"
-								>
-									<span class="text-sm font-medium text-zinc-300">{item}</span>
-									<Settings2 class="h-4 w-4 text-zinc-600" />
+					{:else}
+						<div class="divide-y divide-zinc-800/60">
+							{#each chatProviders as p (p.id)}
+								<div class="p-5">
+									<div class="flex items-center justify-between">
+										<div>
+											<h3 class="text-sm font-semibold text-zinc-100">{p.label}</h3>
+											<p class="mt-0.5 text-xs text-zinc-500">
+												{#if p.keyStored}
+													<span class="text-emerald-400">Key on file {p.hint}</span>
+													<span class="text-zinc-600"> (personal or workspace)</span>
+												{:else if p.envConfigured}
+													<span class="text-sky-400">Provided by the server</span>
+												{:else}
+													Not configured
+												{/if}
+											</p>
+										</div>
+										{#if p.keyStored}
+											<button
+												onclick={() => $deleteKeyMut.mutate(p.id)}
+												disabled={$deleteKeyMut.isPending}
+												class="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:bg-rose-500/10 hover:text-rose-400 disabled:opacity-40"
+												title="Removes your personal key for this provider"
+											>
+												<Trash2 class="h-3.5 w-3.5" /> Remove my key
+											</button>
+										{/if}
+									</div>
+									<div class="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
+										<input
+											type="password"
+											placeholder="Paste personal API key…"
+											bind:value={drafts[p.id]}
+											class="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-indigo-500 focus:outline-none"
+										/>
+										<button
+											onclick={() => savePersonalKey(p.id)}
+											disabled={!drafts[p.id]?.trim() || $saveKeyMut.isPending}
+											class="flex items-center justify-center gap-1.5 rounded-md border border-indigo-500/50 bg-zinc-950 px-4 py-2 text-sm font-medium text-indigo-400 hover:bg-indigo-500/10 disabled:opacity-40"
+										>
+											<Check class="h-4 w-4" /> Save
+										</button>
+									</div>
 								</div>
 							{/each}
 						</div>
-					</div>
-					<div class="flex items-center justify-end gap-3 border-t border-zinc-800 bg-zinc-900/30 p-4">
-						{#if savedNotice}
-							<span in:fade={{ duration: 150 }} class="text-sm font-medium text-emerald-400">
-								{savedNotice}
-							</span>
+						{#if $saveKeyMut.isError || $deleteKeyMut.isError}
+							<p class="px-6 pb-4 text-xs text-rose-400">
+								{($saveKeyMut.error ?? $deleteKeyMut.error) instanceof Error
+									? ($saveKeyMut.error ?? $deleteKeyMut.error)?.message
+									: 'Operation failed — you may need to sign in.'}
+							</p>
 						{/if}
-						<button
-							onclick={savePolicy}
-							disabled={$savePrefs.isPending}
-							class="rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
-						>
-							{$savePrefs.isPending ? 'Saving...' : 'Save Policy'}
-						</button>
+					{/if}
+				</div>
+			{:else if activeTab === 'Sessions & Security'}
+				<div
+					class="overflow-hidden rounded-xl border border-zinc-800 glass-panel"
+					in:fly={{ y: 8, duration: 300 }}
+				>
+					<div class="flex items-center justify-between border-b border-zinc-800 bg-zinc-900/50 px-6 py-4">
+						<div>
+							<h2 class="text-lg font-semibold text-zinc-200">Active Sessions</h2>
+							<p class="text-sm text-zinc-500">Devices currently signed in to your account.</p>
+						</div>
+						{#if sessions.length > 1}
+							<button
+								onclick={revokeOthers}
+								disabled={sessionsBusy}
+								class="flex items-center gap-1.5 rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-rose-500/10 hover:text-rose-400 disabled:opacity-40"
+							>
+								<LogOut class="h-3.5 w-3.5" /> Sign out other sessions
+							</button>
+						{/if}
 					</div>
+
+					{#if sessionsLoading}
+						<div class="space-y-3 p-6">
+							{#each Array(2) as _, i (i)}
+								<Skeleton class="h-14 rounded-lg" />
+							{/each}
+						</div>
+					{:else if sessionsError}
+						<div class="flex items-start gap-2 p-6 text-sm text-zinc-400">
+							<AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+							<div>
+								Session management is unavailable: {sessionsError}
+								<span class="block text-xs text-zinc-600">
+									(On dev servers without auth configured this is expected.)
+								</span>
+							</div>
+						</div>
+					{:else if sessions.length === 0}
+						<div class="p-6 text-sm text-zinc-500">No active sessions found.</div>
+					{:else}
+						<div class="divide-y divide-zinc-800/60">
+							{#each sessions as s (s.id)}
+								<div class="flex items-center justify-between gap-4 p-5" in:fade={{ duration: 150 }}>
+									<div class="flex items-center gap-3">
+										<MonitorSmartphone class="h-4 w-4 shrink-0 text-zinc-500" />
+										<div>
+											<p class="text-sm font-medium text-zinc-200">
+												{deviceLabel(s.userAgent)}
+												{#if s.token === currentToken}
+													<span class="ml-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-400">
+														This device
+													</span>
+												{/if}
+											</p>
+											<p class="mt-0.5 text-xs text-zinc-500">
+												{s.ipAddress || 'IP unknown'} · signed in {fmtDate(s.createdAt)} · expires
+												{fmtDate(s.expiresAt)}
+											</p>
+										</div>
+									</div>
+									{#if s.token !== currentToken}
+										<button
+											onclick={() => revokeSession(s.token)}
+											disabled={sessionsBusy}
+											class="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-rose-500/10 hover:text-rose-400 disabled:opacity-40"
+										>
+											Revoke
+										</button>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					{/if}
 				</div>
 			{:else}
 				<div
-					class="flex flex-col items-center justify-center rounded-xl border border-zinc-800 p-12 text-center glass-panel"
-					in:fade={{ duration: 300 }}
+					class="overflow-hidden rounded-xl border border-zinc-800 glass-panel"
+					in:fly={{ y: 8, duration: 300 }}
 				>
-					<div
-						class="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 text-zinc-500"
-					>
-						<Info class="h-6 w-6" />
+					<div class="border-b border-zinc-800 bg-zinc-900/50 px-6 py-4">
+						<h2 class="text-lg font-semibold text-zinc-200">Workspace Settings</h2>
+						<p class="text-sm text-zinc-500">
+							Workspace-wide configuration (users, governance, AI routing, billing) is managed in
+							the Admin console and requires an admin role.
+						</p>
 					</div>
-					<h3 class="mb-2 text-lg font-medium text-zinc-200">{activeTab} Settings</h3>
-					<p class="max-w-md text-sm text-zinc-500">
-						Configuration options for {activeTab.toLowerCase()} are managed in the enterprise
-						dashboard. Contact your system administrator to adjust these policies.
-					</p>
+					<div class="divide-y divide-zinc-800/60">
+						{#each adminLinks as link (link.href)}
+							<a
+								href={link.href}
+								class="flex items-center justify-between p-4 transition-colors hover:bg-zinc-900/50"
+							>
+								<div>
+									<p class="text-sm font-medium text-zinc-200">{link.label}</p>
+									<p class="mt-0.5 text-xs text-zinc-500">{link.description}</p>
+								</div>
+								<ExternalLink class="h-4 w-4 text-zinc-600" />
+							</a>
+						{/each}
+					</div>
 				</div>
 			{/if}
 		</div>
 	</div>
 </main>
-
-{#snippet pipelineRow(title: string, description: string, get: () => boolean, onToggle: () => void)}
-	<div class="flex items-center justify-between gap-4">
-		<div>
-			<h4 class="text-sm font-medium text-zinc-200">{title}</h4>
-			<p class="mt-1 max-w-sm text-xs text-zinc-500">{description}</p>
-		</div>
-		<button
-			type="button"
-			role="switch"
-			aria-label={title}
-			aria-checked={get()}
-			onclick={onToggle}
-			class={cn(
-				'relative h-6 w-11 shrink-0 rounded-full transition-colors',
-				get() ? 'bg-indigo-600' : 'bg-zinc-800'
-			)}
-		>
-			<span
-				class={cn(
-					'absolute top-[2px] h-5 w-5 rounded-full bg-white transition-all',
-					get() ? 'left-[22px]' : 'left-[2px]'
-				)}
-			></span>
-		</button>
-	</div>
-{/snippet}

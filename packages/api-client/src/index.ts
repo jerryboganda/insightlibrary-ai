@@ -1,5 +1,6 @@
 import type {
 	AiKeyInput,
+	AiProviderSettingsInput,
 	AiProvidersResponse,
 	AuditLog,
 	Claim,
@@ -72,6 +73,10 @@ export interface OrgSettingsValues {
 	searchSnippetLength: number;
 	copilotPromptOverrides: Record<string, string>;
 	sourcePriorityOrder: string[];
+	/** Monthly AI spend hard limit in USD; 0 = unlimited (no enforcement). */
+	budgetMonthlyLimitUsd: number;
+	/** Soft-alert threshold as a % of the hard limit (default 80). */
+	budgetSoftThresholdPct: number;
 }
 
 /** GET/PUT /api/org/settings response. */
@@ -186,12 +191,40 @@ export class ApiClient {
 			method: 'POST',
 			body: JSON.stringify({ grade })
 		});
+	/** List MCQs. Non-editors receive items WITHOUT correctOptionId/explanation — grade via attemptMcq. */
+	getMcqs = (opts?: { topicId?: string; status?: 'draft' | 'published' | 'all' }) => {
+		const params = new URLSearchParams();
+		if (opts?.topicId) params.set('topicId', opts.topicId);
+		if (opts?.status) params.set('status', opts.status);
+		const qs = params.toString();
+		return this.request<{
+			items: (Omit<Mcq, 'correctOptionId' | 'explanation'> &
+				Partial<Pick<Mcq, 'correctOptionId' | 'explanation'>> & { status?: 'draft' | 'published' })[];
+			stats?: { attempts: number; correct: number; accuracy: number } | null;
+			total?: number;
+		}>(`/api/mcqs${qs ? `?${qs}` : ''}`);
+	};
+	/** @deprecated Use getMcqs — list payloads no longer include answer keys for non-editors. */
 	listMcqs = (topicId?: string) =>
-		this.request<ListEnvelope<Mcq>>(`/api/mcqs${topicId ? `?topicId=${topicId}` : ''}`).then((r) => r.items);
+		this.getMcqs(topicId ? { topicId } : undefined).then((r) => r.items);
 	generateMcqs = (topicId: string, count?: number) =>
-		this.request<{ generated: number }>('/api/mcqs', {
+		this.request<{ generated: number; status?: 'draft' | 'published' }>('/api/mcqs', {
 			method: 'POST',
 			body: JSON.stringify({ topicId, count })
+		});
+	/** Grade an answer server-side — the only place answers/explanations are revealed to learners (B13). */
+	attemptMcq = (id: string, optionId: string) =>
+		this.request<{
+			correct: boolean;
+			correctOptionId: string;
+			explanation: string;
+			stats: { attempts: number; correct: number; accuracy: number };
+		}>(`/api/mcqs/${id}/attempt`, { method: 'POST', body: JSON.stringify({ optionId }) });
+	/** Publish/unpublish an AI-generated draft MCQ (editor+). */
+	setMcqStatus = (id: string, status: 'draft' | 'published') =>
+		this.request<{ item: Mcq }>(`/api/mcqs/${id}`, {
+			method: 'PATCH',
+			body: JSON.stringify({ status })
 		});
 	generateCase = (topicId: string) =>
 		this.request<{ case: string }>(`/api/topics/${topicId}/case`, { method: 'POST' });
@@ -224,6 +257,17 @@ export class ApiClient {
 
 	// Multi-provider AI settings
 	getAiProviders = () => this.request<AiProvidersResponse>('/api/ai/providers');
+	/**
+	 * Org routing defaults (admin). Omitted fields are left unchanged;
+	 * `defaultProvider: null` clears the default; `taskRouting` replaces the
+	 * stored map. 400 on unknown provider/task ids — validate against
+	 * getAiProviders().providers (kind==='chat') and taskProviders keys.
+	 */
+	setAiProviderSettings = (input: AiProviderSettingsInput) =>
+		this.request<{ ok: true; defaultProvider: string | null; taskRouting: Record<string, string> }>(
+			'/api/ai/providers',
+			{ method: 'PUT', body: JSON.stringify(input) }
+		);
 	saveAiKey = (input: AiKeyInput) =>
 		this.request<{ ok: true }>('/api/ai/keys', { method: 'POST', body: JSON.stringify(input) });
 	deleteAiKey = (provider: ProviderId, scope: 'org' | 'user' = 'org') =>
@@ -253,6 +297,53 @@ export class ApiClient {
 		this.request<{ id: string; role: string; status: string }>(`/api/users/${id}`, {
 			method: 'PATCH',
 			body: JSON.stringify(patch)
+		});
+	/** Real directory (app users enriched with better-auth account state) + pending invitations (admin). */
+	listUserDirectory = () =>
+		this.request<{
+			items: (User & {
+				status?: 'active' | 'suspended';
+				emailVerified?: boolean | null;
+				createdAt?: string | null;
+			})[];
+			invitations: {
+				id: string;
+				email: string;
+				role: string;
+				status: 'pending' | 'expired';
+				createdAt: string;
+				expiresAt: string;
+				inviteUrl: string;
+			}[];
+			total: number;
+		}>('/api/users');
+	/** Create/refresh an invitation. emailSent=false → hand over inviteUrl manually (no SMTP transport). */
+	inviteUser = (email: string, role: string) =>
+		this.request<{
+			id: string;
+			email: string;
+			role: string;
+			status: string;
+			expiresAt: string;
+			inviteUrl: string;
+			emailSent: boolean;
+		}>('/api/users', { method: 'POST', body: JSON.stringify({ action: 'invite', email, role }) });
+	revokeInvite = (invitationId: string) =>
+		this.request<{ ok: true }>('/api/users', {
+			method: 'POST',
+			body: JSON.stringify({ action: 'revoke-invite', invitationId })
+		});
+	/** Issue a one-time temporary password and revoke the user's sessions (admin). */
+	resetUserPassword = (id: string) =>
+		this.request<{ ok: true; tempPassword: string }>(`/api/users/${id}`, {
+			method: 'POST',
+			body: JSON.stringify({ action: 'reset-password' })
+		});
+	/** Force logout everywhere (admin). */
+	revokeUserSessions = (id: string) =>
+		this.request<{ ok: true; revoked: number }>(`/api/users/${id}`, {
+			method: 'POST',
+			body: JSON.stringify({ action: 'revoke-sessions' })
 		});
 
 	// API keys
@@ -294,7 +385,9 @@ export class ApiClient {
 		this.request<OrgSettingsResponse>('/api/org/settings', { method: 'PUT', body: JSON.stringify(input) });
 
 	// Admin
-	getUsage = () => this.request<UsageMetrics>('/api/usage');
+	/** Usage metering aggregates; period defaults to the current calendar month. */
+	getUsage = (period?: 'month' | 'all') =>
+		this.request<UsageMetrics>(`/api/usage${period ? `?period=${period}` : ''}`);
 	getEvaluation = () => this.request<EvaluationMetrics>('/api/evaluation');
 	runEvaluation = () => this.request<EvaluationMetrics>('/api/evaluation/run', { method: 'POST' });
 	listProcessing = () =>

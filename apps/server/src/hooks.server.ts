@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { SessionUser } from '@insightlibrary/schemas';
 import { DEV_SESSION_USER, getAuth, isAuthEnabled } from '$lib/server/auth';
+import { ensureAppOrg, normalizeAppRole } from '$lib/server/auth-config';
 import { getDb } from '$lib/server/db/client';
 import { apiKeys } from '$lib/server/db/schema';
 import { recordAudit } from '$lib/server/audit';
@@ -31,6 +32,10 @@ const CORS_HEADERS = {
 	// x-ai-oauth-token: sent by the desktop copilot (ChatGPT-subscription path) and
 	// read by /api/copilot — must be preflight-allowed for Tauri origins.
 	'Access-Control-Allow-Headers': 'Authorization, Content-Type, x-ai-oauth-token',
+	// set-auth-token: the better-auth bearer plugin returns the session token in
+	// this response header on sign-in — cross-origin JS (the Tauri webview) can
+	// only read it when it is explicitly exposed.
+	'Access-Control-Expose-Headers': 'set-auth-token',
 	'Access-Control-Allow-Credentials': 'true',
 	'Access-Control-Max-Age': '86400'
 };
@@ -51,6 +56,10 @@ const cors: Handle = async ({ event, resolve }) => {
 	if (allowed) {
 		response.headers.set('Access-Control-Allow-Origin', origin);
 		response.headers.set('Access-Control-Allow-Credentials', 'true');
+		// Expose the bearer session token header on the actual response (the
+		// preflight copy above is informational only) so the desktop client can
+		// persist it to the OS keyring.
+		response.headers.set('Access-Control-Expose-Headers', 'set-auth-token');
 		response.headers.append('Vary', 'Origin');
 	}
 	return response;
@@ -143,14 +152,22 @@ const auth: Handle = async ({ event, resolve }) => {
 		const session = await authApi.api.getSession({ headers: event.request.headers });
 		if (session?.user) {
 			const u = session.user;
+			// C10: resolve the better-auth active organization to a row that really
+			// exists in the app `organizations` table (mirrored on first sight, and
+			// falling back to the seeded default org). This keeps org-scoped reads,
+			// writes and audit_logs FKs consistent instead of dangling on a raw
+			// better-auth org id. ensureAppOrg never throws and caches per process.
+			const org = await ensureAppOrg(session.session?.activeOrganizationId);
 			event.locals.user = {
 				id: u.id,
 				name: u.name ?? u.email,
 				email: u.email,
-				role: (u.role as SessionUser['role']) ?? 'viewer',
-				orgId: session.session?.activeOrganizationId ?? '',
-				orgName: '',
-				tenantId: session.session?.activeOrganizationId ?? ''
+				// better-auth roles may be unset, 'user', or a CSV — normalize to the
+				// app enum so sessionUserSchema.parse (/api/session) never rejects.
+				role: normalizeAppRole((u as { role?: string | null }).role),
+				orgId: org.id,
+				orgName: org.name,
+				tenantId: org.tenantId
 			};
 		} else {
 			event.locals.user = null;

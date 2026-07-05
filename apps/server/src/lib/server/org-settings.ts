@@ -65,6 +65,11 @@ export interface OrgSettingsValues {
 	copilotPromptOverrides: Record<string, string>;
 	/** Admin-ranked source-tier ordering (workspace policy). */
 	sourcePriorityOrder: string[];
+	// ── FinOps budget (C6) — enforced by the AI provider router ──────────────
+	/** Monthly hard AI-spend limit in USD. 0 = unlimited (no enforcement). */
+	budgetMonthlyLimitUsd: number;
+	/** % of the hard limit at which a soft-alert audit event fires (0 disables). */
+	budgetSoftThresholdPct: number;
 }
 
 export interface ResolvedOrgSettings extends OrgSettingsValues {
@@ -137,7 +142,9 @@ export function orgSettingsDefaults(): OrgSettingsValues {
 		searchTopK: clampInt(envNum('SEARCH_TOP_K', 20), 1, 100),
 		searchSnippetLength: clampInt(envNum('SEARCH_SNIPPET_LENGTH', 240), 80, 2000),
 		copilotPromptOverrides: {},
-		sourcePriorityOrder: []
+		sourcePriorityOrder: [],
+		budgetMonthlyLimitUsd: clamp(envNum('BUDGET_MONTHLY_LIMIT_USD', 0), 0, 10_000_000),
+		budgetSoftThresholdPct: clamp(envNum('BUDGET_SOFT_THRESHOLD_PCT', 80), 0, 100)
 	};
 }
 
@@ -189,7 +196,9 @@ const SANITIZERS: Record<keyof OrgSettingsValues, Sanitizer> = {
 	searchTopK: num(1, 100, true),
 	searchSnippetLength: num(80, 2000, true),
 	copilotPromptOverrides: stringMap,
-	sourcePriorityOrder: stringList
+	sourcePriorityOrder: stringList,
+	budgetMonthlyLimitUsd: num(0, 10_000_000),
+	budgetSoftThresholdPct: num(0, 100)
 };
 
 export const ORG_SETTING_KEYS = Object.keys(SANITIZERS) as (keyof OrgSettingsValues)[];
@@ -230,7 +239,7 @@ export async function getOrgSettings(orgId = 'org_1'): Promise<ResolvedOrgSettin
 					if (!(key in stored)) continue;
 					const clean = SANITIZERS[key](stored[key]);
 					if (clean !== undefined) {
-						(resolved as Record<string, unknown>)[key] = clean;
+						(resolved as unknown as Record<string, unknown>)[key] = clean;
 						resolved.overridden.push(key);
 					}
 				}

@@ -5,6 +5,7 @@
 import { getDb } from '../db/client';
 import { mcqs } from '../db/schema';
 import { getRouter } from '../ai/providers';
+import { getOrgSettings } from '../org-settings';
 import { retrieveTopicEvidence } from './retrieve';
 
 const MCQ_SCHEMA: Record<string, unknown> = {
@@ -29,13 +30,23 @@ const MCQ_SCHEMA: Record<string, unknown> = {
 	required: ['mcqs']
 };
 
-export async function generateMcqsForTopic(topicId: string, orgId = 'org_1', count = 5): Promise<{ generated: number }> {
+export async function generateMcqsForTopic(
+	topicId: string,
+	orgId = 'org_1',
+	count = 5
+): Promise<{ generated: number; status: 'draft' | 'published' }> {
+	// C9 governance gate: when the org requires human review, AI-generated
+	// questions land as drafts (invisible to learners until an editor publishes
+	// them via PATCH /api/mcqs/[id]). Live org_settings read — no restart needed.
+	const status: 'draft' | 'published' = (await getOrgSettings(orgId)).requireReview
+		? 'draft'
+		: 'published';
 	const db = getDb();
-	if (!db) return { generated: 0 };
+	if (!db) return { generated: 0, status };
 	const router = getRouter();
-	if (!router.available('synthesis')) return { generated: 0 };
+	if (!router.available('synthesis')) return { generated: 0, status };
 	const { topicName, evidence } = await retrieveTopicEvidence(topicId);
-	if (!evidence.length) return { generated: 0 };
+	if (!evidence.length) return { generated: 0, status };
 
 	const validClaimIds = new Set(evidence.map((e) => e.id));
 	const claimList = evidence.slice(0, 60).map((e) => `[${e.id}] ${e.text}`).join('\n');
@@ -54,7 +65,7 @@ export async function generateMcqsForTopic(topicId: string, orgId = 'org_1', cou
 			{ task: 'synthesis', schema: MCQ_SCHEMA, temperature: 0.3 }
 		)
 		.catch(() => null);
-	if (!res?.mcqs?.length) return { generated: 0 };
+	if (!res?.mcqs?.length) return { generated: 0, status };
 
 	let n = 0;
 	const stamp = Date.now();
@@ -73,10 +84,10 @@ export async function generateMcqsForTopic(topicId: string, orgId = 'org_1', cou
 				correctOptionId: m.correctOptionId,
 				explanation: m.explanation ?? '',
 				difficulty: ['easy', 'medium', 'hard'].includes(m.difficulty ?? '') ? (m.difficulty as string) : 'medium',
-				status: 'published'
+				status
 			})
 			.onConflictDoNothing();
 		n++;
 	}
-	return { generated: n };
+	return { generated: n, status };
 }

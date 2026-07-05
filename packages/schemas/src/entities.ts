@@ -170,8 +170,9 @@ export const mcqSchema = z.object({
 	claimId: z.string().nullish(),
 	stem: z.string(),
 	options: z.array(mcqOptionSchema),
-	correctOptionId: z.string(),
-	explanation: z.string(),
+	// Omitted from list payloads for non-editors (B13) — revealed via POST /api/mcqs/[id]/attempt.
+	correctOptionId: z.string().optional(),
+	explanation: z.string().optional(),
 	difficulty: z.enum(['easy', 'medium', 'hard']),
 	examTags: z.array(z.string()),
 	status: z.enum(['draft', 'published']).default('draft')
@@ -235,7 +236,34 @@ export const usageMetricsSchema = z.object({
 	costPerQuery: z.number(),
 	activeUsers: z.number().int(),
 	storageGB: z.number(),
-	events: z.array(usageEventSchema)
+	events: z.array(usageEventSchema),
+	// ── Additive metering extensions (GET /api/usage; absent from the seed repo) ──
+	/** Aggregation window this payload covers. */
+	period: z.enum(['month', 'all']).optional(),
+	/** Org budget configuration + live month spend (org_settings-backed). */
+	budget: z
+		.object({
+			monthlyLimitUsd: z.number(),
+			softThresholdPct: z.number(),
+			spendThisMonthUsd: z.number(),
+			enforced: z.boolean()
+		})
+		.optional(),
+	/** Per provider+model rollup of metered AI calls. */
+	byProvider: z
+		.array(
+			z.object({
+				provider: z.string(),
+				model: z.string(),
+				calls: z.number().int(),
+				tokensIn: z.number(),
+				tokensOut: z.number(),
+				costUsd: z.number()
+			})
+		)
+		.optional(),
+	/** Earliest metered event timestamp, null when nothing metered yet. */
+	meteredSince: z.string().nullable().optional()
 });
 export type UsageMetrics = z.infer<typeof usageMetricsSchema>;
 

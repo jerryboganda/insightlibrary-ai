@@ -35,6 +35,9 @@ export type TaskKind =
 	| 'rerank' // LLM-based reranking
 	| 'embedding';
 
+/** All routable tasks — used to validate org task_routing and build UIs. */
+export const TASK_KINDS: readonly TaskKind[] = ['chat', 'extraction', 'synthesis', 'nli', 'rerank', 'embedding'];
+
 export interface ChatMessage {
 	role: 'system' | 'user' | 'assistant';
 	content: string;
@@ -88,5 +91,24 @@ export class UnsupportedError extends Error {
 	constructor(msg = 'unsupported provider capability') {
 		super(msg);
 		this.name = 'UnsupportedError';
+	}
+}
+
+/**
+ * Thrown by the router (and embedText) when the org's monthly hard budget limit
+ * (org_settings.budgetMonthlyLimitUsd) has been reached — the AI call is refused
+ * before any tokens are spent. Callers may surface `limitUsd`/`spendUsd`.
+ */
+export class BudgetExceededError extends Error {
+	constructor(
+		public readonly limitUsd: number,
+		public readonly spendUsd: number,
+		msg?: string
+	) {
+		super(
+			msg ??
+				`AI budget exceeded: $${spendUsd.toFixed(2)} spent of the $${limitUsd.toFixed(2)} monthly hard limit — call refused`
+		);
+		this.name = 'BudgetExceededError';
 	}
 }

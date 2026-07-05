@@ -5,13 +5,19 @@
 	import { api } from '$lib/api';
 	import { Skeleton, DonutChart, BarChart } from '$lib/components/ui';
 
+	// Header toggle: current calendar month vs all recorded time. Drives the
+	// server-side ?period= filter — switching re-queries the metering ledger.
+	let period = $state<'month' | 'all'>('month');
+
 	// Live FinOps feed. Shape matches UsageMetrics (monthlyBudget, currentSpend, queries,
 	// costPerQuery, activeUsers, storageGB, events[]).
-	const usage = createQuery({ queryKey: ['usage'], queryFn: () => api.getUsage() });
+	const usage = $derived(
+		createQuery({ queryKey: ['usage', period], queryFn: () => api.getUsage(period) })
+	);
 
 	const data = $derived($usage.data);
 	const percentage = $derived(
-		data ? (data.currentSpend / data.monthlyBudget) * 100 : 0
+		data && data.monthlyBudget > 0 ? (data.currentSpend / data.monthlyBudget) * 100 : 0
 	);
 
 	// Top-line stat cards derived from the live feed.
@@ -47,9 +53,6 @@
 
 	const usd = (n: number) => `$${n.toFixed(2)}`;
 
-	// Client-side period filter for the header toggle.
-	let period = $state<'month' | 'all'>('month');
-
 	// Build a CSV from an array of rows and trigger a browser download.
 	function downloadCsv(name: string, rows: (string | number)[][]) {
 		const csv = rows
@@ -82,7 +85,8 @@
 					Usage &amp; FinOps
 				</h1>
 				<p class="mt-1 text-sm text-zinc-400">
-					Monitor Copilot SDK consumption and API costs for the current billing cycle.
+					Monitor Copilot SDK consumption and API costs
+					{period === 'month' ? 'for the current calendar month' : 'across all recorded time'}.
 				</p>
 			</div>
 			<div class="flex gap-3">
@@ -132,13 +136,19 @@
 					</div>
 					<div class="flex items-end gap-2">
 						<span class="text-3xl font-bold text-zinc-100">${data?.currentSpend.toFixed(2)}</span>
-						<span class="mb-1 text-sm text-zinc-500">/ ${data?.monthlyBudget}</span>
+						{#if (data?.monthlyBudget ?? 0) > 0}
+							<span class="mb-1 text-sm text-zinc-500">/ ${data?.monthlyBudget}</span>
+						{/if}
 					</div>
 					<div class="mt-4 flex items-center justify-between text-xs text-zinc-500">
-						<span>{percentage.toFixed(1)}% of budget</span>
-						<div class="h-1.5 w-16 overflow-hidden rounded-full bg-zinc-900">
-							<div class="h-full bg-emerald-500" style="width: {Math.min(100, percentage)}%"></div>
-						</div>
+						{#if (data?.monthlyBudget ?? 0) > 0}
+							<span>{percentage.toFixed(1)}% of budget</span>
+							<div class="h-1.5 w-16 overflow-hidden rounded-full bg-zinc-900">
+								<div class="h-full bg-emerald-500" style="width: {Math.min(100, percentage)}%"></div>
+							</div>
+						{:else}
+							<span>No monthly budget configured</span>
+						{/if}
 					</div>
 				</div>
 
@@ -167,13 +177,19 @@
 				<div class="glass-panel rounded-xl border border-zinc-800 p-6">
 					<h2 class="mb-2 text-base font-semibold text-zinc-200">Budget Consumed</h2>
 					<p class="mb-4 text-xs text-zinc-500">Spend against the monthly budget ceiling.</p>
-					<DonutChart
-						value={data.currentSpend}
-						max={data.monthlyBudget}
-						label="of ${data.monthlyBudget} budget"
-						centerText={`${percentage.toFixed(0)}%`}
-						color={percentage > 90 ? '#f43f5e' : percentage > 70 ? '#f59e0b' : '#10b981'}
-					/>
+					{#if data.monthlyBudget > 0}
+						<DonutChart
+							value={data.currentSpend}
+							max={data.monthlyBudget}
+							label="of ${data.monthlyBudget} budget"
+							centerText={`${percentage.toFixed(0)}%`}
+							color={percentage > 90 ? '#f43f5e' : percentage > 70 ? '#f59e0b' : '#10b981'}
+						/>
+					{:else}
+						<p class="py-8 text-center text-sm text-zinc-500">
+							No monthly budget configured. Set one under Settings → FinOps.
+						</p>
+					{/if}
 				</div>
 				<div class="glass-panel rounded-xl border border-zinc-800 p-6 lg:col-span-2">
 					<div class="mb-4 flex items-center justify-between">

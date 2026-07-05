@@ -6,15 +6,19 @@
 
 	const folders = createQuery({ queryKey: ['folders'], queryFn: () => api.listFolders() });
 	const review = createQuery({ queryKey: ['review'], queryFn: () => api.listReview() });
+	const graph = createQuery({ queryKey: ['graph'], queryFn: () => api.getGraph() });
 
 	const totalDocs = $derived($folders.data?.reduce((s, f) => s + f.docs, 0) ?? 0);
 	const totalTopics = $derived($folders.data?.reduce((s, f) => s + f.topics, 0) ?? 0);
 	const conflicts = $derived($review.data?.filter((r) => r.status === 'pending').length ?? 0);
+	const graphNodes = $derived(
+		$graph.isPending ? '…' : $graph.isError ? '—' : ($graph.data?.nodes.length ?? 0).toLocaleString()
+	);
 
 	const stats = $derived([
 		{ label: 'Total Documents', value: String(totalDocs), icon: FileStack, tone: 'bg-indigo-500/10 text-indigo-400' },
 		{ label: 'Canonical Topics', value: totalTopics.toLocaleString(), icon: Brain, tone: 'bg-emerald-500/10 text-emerald-400' },
-		{ label: 'Graph Nodes (Entities)', value: '42.1k', icon: Network, tone: 'bg-amber-500/10 text-amber-400' },
+		{ label: 'Graph Nodes (Entities)', value: graphNodes, icon: Network, tone: 'bg-amber-500/10 text-amber-400' },
 		{ label: 'Pending Conflicts', value: String(conflicts), icon: Flame, tone: 'bg-rose-500/10 text-rose-400' }
 	]);
 </script>
