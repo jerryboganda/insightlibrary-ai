@@ -4,10 +4,15 @@ import { desc, eq } from 'drizzle-orm';
 import { getDb } from '$lib/server/db/client';
 import { topicVersions } from '$lib/server/db/schema';
 
-/** GET /api/topics/[id]/versions — version history for the SSOT version tab. */
-export const GET: RequestHandler = async ({ params }) => {
+/**
+ * GET /api/topics/[id]/versions — version history for the SSOT History tab.
+ * Pass ?include=snapshot to also receive each version's sections_snapshot
+ * (used by restore previews; omitted by default to keep the list light).
+ */
+export const GET: RequestHandler = async ({ params, url }) => {
 	const db = getDb();
 	if (!db) return json({ items: [], total: 0 });
+	const includeSnapshot = url.searchParams.get('include') === 'snapshot';
 	const rows = await db
 		.select()
 		.from(topicVersions)
@@ -21,7 +26,8 @@ export const GET: RequestHandler = async ({ params }) => {
 		changelog: r.changelog,
 		faithfulness: r.faithfulness,
 		createdBy: r.createdBy,
-		createdAt: r.createdAt.toISOString()
+		createdAt: r.createdAt.toISOString(),
+		...(includeSnapshot ? { sectionsSnapshot: r.sectionsSnapshot } : {})
 	}));
 	return json({ items, total: items.length });
 };

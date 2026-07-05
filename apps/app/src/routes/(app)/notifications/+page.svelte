@@ -48,21 +48,34 @@
 		}
 	});
 
-	// No per-notification "mark read" endpoint exists; optimistically flip the
-	// read flag in the query cache so the UI reflects the action immediately.
-	function markReadLocal(id: string, read = true) {
-		qc.setQueryData<Notification[]>(['notifications'], (prev) =>
-			(prev ?? []).map((n) => (n.id === id ? { ...n, read } : n))
-		);
-	}
+	// Per-item read state persists server-side via PATCH /api/notifications/[id]
+	// (B29) — optimistic cache flip for instant feedback, rolled back on error,
+	// so unread state survives reloads.
+	const markRead = createMutation({
+		mutationFn: ({ id, read }: { id: string; read: boolean }) =>
+			api.updateNotification(id, { read }),
+		onMutate: async ({ id, read }) => {
+			await qc.cancelQueries({ queryKey: ['notifications'] });
+			const prev = qc.getQueryData<Notification[]>(['notifications']);
+			qc.setQueryData<Notification[]>(['notifications'], (list) =>
+				(list ?? []).map((n) => (n.id === id ? { ...n, read } : n))
+			);
+			return { prev };
+		},
+		onError: (_err, _vars, ctx) => {
+			if (ctx?.prev) qc.setQueryData(['notifications'], ctx.prev);
+		},
+		onSettled: () => qc.invalidateQueries({ queryKey: ['notifications'] })
+	});
 
 	// The item action button: `action` is a label string. If it names a route
 	// (starts with "/") navigate there; otherwise treat the click as "mark read".
 	function handleAction(n: Notification) {
 		if (n.action && n.action.startsWith('/')) {
+			if (!n.read) $markRead.mutate({ id: n.id, read: true });
 			goto(n.action);
 		} else {
-			markReadLocal(n.id, true);
+			$markRead.mutate({ id: n.id, read: true });
 		}
 	}
 
@@ -333,7 +346,7 @@
 												<button
 													class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
 													onclick={() => {
-														markReadLocal(notification.id, !notification.read);
+														$markRead.mutate({ id: notification.id, read: !notification.read });
 														closeMenu();
 													}}
 												>

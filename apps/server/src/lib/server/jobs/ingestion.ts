@@ -8,9 +8,12 @@ import { contextualizeChunks } from '../ingestion/contextualize';
 import { downloadObject } from '../storage/s3';
 import { getDb } from '../db/client';
 import * as schema from '../db/schema';
+import { getOrgSettings } from '../org-settings';
 import { isJobCancelled, persistProgress, setBossJobId } from './processing-store';
 import { extractClaimsForDocument } from '../refinery/extract-claims';
 import { correlateDocument } from '../refinery/correlate';
+import { dispatchWebhooks } from '../webhooks/dispatch';
+import { notify } from '../webhooks/notify';
 
 /**
  * Document ingestion pipeline:
@@ -73,6 +76,55 @@ interface MetaChunk {
 	blockId: string | null;
 	context: string | null;
 	embedding: number[] | null;
+}
+
+interface OrgContext {
+	orgId: string;
+	folderId: string | null;
+}
+
+/**
+ * Resolve the document's org (via its folder) so parse-mode/settings lookups,
+ * BYO-key embedding calls, refinery stages, webhooks and notifications are all
+ * scoped to the right tenant instead of the hardcoded default.
+ */
+async function resolveOrgContext(documentId: string): Promise<OrgContext> {
+	const db = getDb();
+	if (!db) return { orgId: 'org_1', folderId: null };
+	try {
+		const res = await db.execute<{ org_id: string; folder_id: string }>(sql`
+			SELECT f.org_id, d.folder_id
+			FROM documents d JOIN folders f ON f.id = d.folder_id
+			WHERE d.id = ${documentId}
+		`);
+		const row = res.rows[0];
+		if (row?.org_id) return { orgId: row.org_id, folderId: row.folder_id ?? null };
+	} catch {
+		/* fall through to default */
+	}
+	return { orgId: 'org_1', folderId: null };
+}
+
+/** Fire the terminal document webhooks + human notification. Never throws. */
+function emitDocumentEvent(
+	ctx: OrgContext,
+	job: IngestionJob,
+	outcome: 'indexed' | 'failed',
+	detail: Record<string, unknown>,
+	description: string
+): void {
+	const action = ctx.folderId ? `/folders/${ctx.folderId}/${job.documentId}` : null;
+	void dispatchWebhooks(ctx.orgId, `document.${outcome}`, {
+		documentId: job.documentId,
+		title: job.documentTitle,
+		...detail
+	}).catch(() => {});
+	notify(ctx.orgId, {
+		type: outcome === 'indexed' ? 'novelty' : 'alert',
+		title: outcome === 'indexed' ? 'Document indexed' : 'Ingestion failed',
+		description,
+		action
+	});
 }
 
 /** Advance documents.status/status_label (+pages when known). No-op without a DB. */
@@ -212,6 +264,12 @@ async function executePipeline(job: IngestionJob): Promise<void> {
 		if (cancelled) throw new IngestionCancelledError();
 	};
 
+	// Tenant scoping: org settings pick the parse mode + SSOT auto-compile
+	// policy, and orgId routes BYO keys/budget for every embed call below.
+	const ctx = await resolveOrgContext(job.documentId);
+	const settings = await getOrgSettings(ctx.orgId).catch(() => null);
+	const autoSsot = settings?.autoSsotTopics ?? true;
+
 	// 1. Extract
 	await report('extract', 10, 'Downloading and extracting text');
 	let bytes: Uint8Array | null = null;
@@ -223,6 +281,13 @@ async function executePipeline(job: IngestionJob): Promise<void> {
 	if (!text) {
 		await report('done', 100, 'Indexed (metadata only — no extractable text)');
 		await markDocumentStatus(job.documentId, 'indexed', 'Indexed (metadata only)').catch(() => {});
+		emitDocumentEvent(
+			ctx,
+			job,
+			'indexed',
+			{ pages: 0, chunks: 0, claims: 0, metadataOnly: true },
+			`"${job.documentTitle}" indexed (metadata only — no extractable text)`
+		);
 		return;
 	}
 
@@ -231,7 +296,7 @@ async function executePipeline(job: IngestionJob): Promise<void> {
 	await report('parse', 28, 'Parsing structure (pages, blocks)');
 	let parsed: ParsedDoc;
 	if (bytes && job.storageKey) {
-		parsed = await parseDocument(bytes, job.storageKey).catch(() => ({
+		parsed = await parseDocument(bytes, job.storageKey, { orgId: ctx.orgId }).catch(() => ({
 			pages: [{ pageNo: 1 }],
 			blocks: [],
 			text: text as string
@@ -260,7 +325,7 @@ async function executePipeline(job: IngestionJob): Promise<void> {
 		if (i > 0 && i % 25 === 0) await checkpoint();
 		const c = metaChunks[i];
 		const toEmbed = c.context ? `${c.context}\n${c.content}` : c.content;
-		c.embedding = await embedText(toEmbed);
+		c.embedding = await embedText(toEmbed, { orgId: ctx.orgId });
 	}
 
 	// 6. Index (FTS + pgvector)
@@ -269,32 +334,54 @@ async function executePipeline(job: IngestionJob): Promise<void> {
 	await indexChunks(job.documentId, metaChunks);
 	await markChunkedCoverage(job.documentId).catch(() => {});
 
-	// 7. Extract claims (refinery) — ontology-linked, topic-routed. Skipped
-	//    silently when no provider is configured.
-	await checkpoint();
-	await report('claims', 92, 'Extracting atomic claims');
-	const claimRes = await extractClaimsForDocument(job.documentId).catch((e) => {
-		console.error('[ingest] claim extraction failed:', e instanceof Error ? e.message : e);
-		return { extracted: 0, topics: 0 };
-	});
-	await markClaimedCoverage(job.documentId).catch(() => {});
+	// 7+8. Refinery — claim extraction + correlation compile the SSOT topic
+	// layer. Honors the org setting autoSsotTopics (admin General settings):
+	// when off, documents are searchable (chunks indexed above) but no topics/
+	// claims/graph are auto-compiled from them.
+	let claimRes = { extracted: 0, topics: 0 };
+	let corr = { merged: 0, conflicts: 0, triples: 0, versioned: 0 };
+	if (autoSsot) {
+		// 7. Extract claims (refinery) — ontology-linked, topic-routed. Skipped
+		//    silently when no provider is configured.
+		await checkpoint();
+		await report('claims', 92, 'Extracting atomic claims');
+		claimRes = await extractClaimsForDocument(job.documentId, ctx.orgId).catch((e) => {
+			console.error('[ingest] claim extraction failed:', e instanceof Error ? e.message : e);
+			return { extracted: 0, topics: 0 };
+		});
+		await markClaimedCoverage(job.documentId).catch(() => {});
 
-	// 8. Correlate — dedup, conflict detection, graph triples, topic versions.
-	await checkpoint();
-	await report('correlate', 97, 'Deduplicating, detecting conflicts, building graph');
-	const corr = await correlateDocument(job.documentId).catch((e) => {
-		console.error('[ingest] correlation failed:', e instanceof Error ? e.message : e);
-		return { merged: 0, conflicts: 0, triples: 0, versioned: 0 };
-	});
+		// 8. Correlate — dedup, conflict detection, graph triples, topic versions.
+		await checkpoint();
+		await report('correlate', 97, 'Deduplicating, detecting conflicts, building graph');
+		corr = await correlateDocument(job.documentId, ctx.orgId).catch((e) => {
+			console.error('[ingest] correlation failed:', e instanceof Error ? e.message : e);
+			return { merged: 0, conflicts: 0, triples: 0, versioned: 0 };
+		});
+	}
 
-	await report(
-		'done',
-		100,
-		`Indexed ${metaChunks.length} chunks / ${parsed.pages.length} pages · ${claimRes.extracted} claims · ` +
+	const summary = autoSsot
+		? `Indexed ${metaChunks.length} chunks / ${parsed.pages.length} pages · ${claimRes.extracted} claims · ` +
 			`${corr.merged} merged · ${corr.conflicts} conflicts · ${corr.triples} graph edges`
-	);
+		: `Indexed ${metaChunks.length} chunks / ${parsed.pages.length} pages · SSOT auto-compile off (org setting)`;
+	await report('done', 100, summary);
 	await markDocumentStatus(job.documentId, 'indexed', 'Indexed', parsed.pages.length).catch(
 		() => {}
+	);
+	emitDocumentEvent(
+		ctx,
+		job,
+		'indexed',
+		{
+			pages: parsed.pages.length,
+			chunks: metaChunks.length,
+			claims: claimRes.extracted,
+			merged: corr.merged,
+			conflicts: corr.conflicts,
+			graphEdges: corr.triples,
+			ssotCompiled: autoSsot
+		},
+		`"${job.documentTitle}" — ${summary}`
 	);
 }
 
@@ -311,6 +398,14 @@ export async function runIngestion(job: IngestionJob): Promise<void> {
 		if (e instanceof IngestionCancelledError) {
 			console.info(`[ingest] cancelled by user: ${job.documentTitle}`);
 			await markDocumentStatus(job.documentId, 'failed', 'Cancelled').catch(() => {});
+			// Machine consumers still learn the document will not index; no human
+			// notification — the cancellation was user-initiated.
+			const ctx = await resolveOrgContext(job.documentId);
+			void dispatchWebhooks(ctx.orgId, 'document.failed', {
+				documentId: job.documentId,
+				title: job.documentTitle,
+				reason: 'cancelled'
+			}).catch(() => {});
 			return;
 		}
 		const message = e instanceof Error ? e.message : String(e);
@@ -323,6 +418,14 @@ export async function runIngestion(job: IngestionJob): Promise<void> {
 			message: `Failed: ${message}`
 		}).catch(() => {});
 		await markDocumentStatus(job.documentId, 'failed', 'Processing failed').catch(() => {});
+		const ctx = await resolveOrgContext(job.documentId);
+		emitDocumentEvent(
+			ctx,
+			job,
+			'failed',
+			{ reason: message.slice(0, 300) },
+			`"${job.documentTitle}" failed to process: ${message.slice(0, 200)}`
+		);
 	}
 }
 

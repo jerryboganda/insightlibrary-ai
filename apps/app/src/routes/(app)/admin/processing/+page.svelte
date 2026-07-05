@@ -28,6 +28,14 @@
 		queryKey: ['processing'],
 		queryFn: () => api.listProcessing()
 	});
+	// Real pipeline rollups (success rate, chunk counts, avg durations, 24h
+	// throughput) from GET /api/processing/stats — replaces the fabricated
+	// header cards. Timing fields are null until stage timestamps exist.
+	const stats = createQuery({
+		queryKey: ['processing-stats'],
+		queryFn: () => api.getProcessingStats(),
+		refetchInterval: 30_000
+	});
 
 	// Cancel / retry a job, then refetch the queue so status settles.
 	const cancelMutation = createMutation({
@@ -103,20 +111,23 @@
 		return 'processing';
 	}
 
-	// Derive a vertical pipeline-step timeline from the current stage (the API doesn't
-	// carry per-step detail, so we synthesize it from the stage ordering).
+	// Derive a vertical pipeline-step timeline from the job's real current stage.
+	// Per-stage average durations come from measured stage timestamps
+	// (/api/processing/stats avgStageDurationsMs); shown as '—' until data exists.
 	function stepsFor(stage: ProcessingStage) {
+		const stageAvgs = $stats.data?.avgStageDurationsMs ?? null;
 		if (stage === 'failed') {
-			return [{ name: 'Document Ingestion', status: 'error' as const }];
+			return [{ name: 'Document Ingestion', status: 'error' as const, avgMs: null }];
 		}
 		const current = STAGE_ORDER.indexOf(stage);
 		return STAGE_ORDER.filter((s) => s !== 'done').map((s) => {
 			const idx = STAGE_ORDER.indexOf(s);
 			const status =
 				stage === 'done' || idx < current ? 'done' : idx === current ? 'running' : 'pending';
-			return { name: STAGE_LABEL[s], status } as {
+			return { name: STAGE_LABEL[s], status, avgMs: stageAvgs?.[s] ?? null } as {
 				name: string;
 				status: 'done' | 'running' | 'pending' | 'error';
+				avgMs: number | null;
 			};
 		});
 	}
@@ -127,12 +138,23 @@
 		return [`${prefix} ${job.message || STAGE_LABEL[job.stage]}`];
 	}
 
-	// Rough ETA from remaining progress (purely presentational).
+	// Format a millisecond duration compactly (820ms / 4.2s / 1.8m).
+	function fmtMs(ms: number | null | undefined): string {
+		if (ms === null || ms === undefined) return '—';
+		if (ms < 1000) return `${Math.round(ms)}ms`;
+		if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+		return `${(ms / 60_000).toFixed(1)}m`;
+	}
+
+	// ETA from the measured average job duration scaled by remaining progress.
+	// Honest '—' when no timing data has been recorded yet (never invented).
 	function etaFor(job: ProcessingJob): string {
 		const s = statusOf(job.stage);
 		if (s === 'completed' || s === 'failed') return '-';
-		const remaining = Math.max(0, 100 - job.progress);
-		return remaining <= 0 ? '<1m' : `${Math.max(1, Math.round((remaining / 100) * 8))}m`;
+		const avg = $stats.data?.avgDurationMs ?? null;
+		if (avg === null) return '—';
+		const remainingMs = avg * (Math.max(0, 100 - job.progress) / 100);
+		return remainingMs < 1000 ? '<1s' : `~${fmtMs(remainingMs)}`;
 	}
 
 	// ── Filters ─────────────────────────────────────────────────────────────────
@@ -168,6 +190,13 @@
 	const selectedJob = $derived(jobs.find((j) => j.id === selectedId) ?? null);
 	const selectedSteps = $derived(selectedJob ? stepsFor(selectedJob.stage) : []);
 	const activeCount = $derived(jobs.filter((j) => statusOf(j.stage) === 'processing').length);
+
+	// Real header-card values from /api/processing/stats (null = honest "no data yet").
+	const successRate = $derived($stats.data?.successRate ?? null);
+	const chunkCount = $derived($stats.data?.chunks ?? null);
+	const claimCount = $derived($stats.data?.claims ?? null);
+	const avgDurationMs = $derived($stats.data?.avgDurationMs ?? null);
+	const throughput = $derived($stats.data?.throughput24h ?? null);
 
 	// ── Live progress via SSE (browser only) ─────────────────────────────────────
 	onMount(() => {
@@ -251,10 +280,27 @@
 					<div class="glass-panel rounded-xl border border-zinc-800 p-5">
 						<div class="mb-3 flex items-center justify-between">
 							<h3 class="flex items-center gap-2 text-sm font-medium text-zinc-400">
-								<FileSearch class="h-4 w-4" /> OCR Success Rate
+								<FileSearch class="h-4 w-4" /> Success Rate
 							</h3>
 						</div>
-						<div class="text-3xl font-bold text-emerald-400">98.2%</div>
+						{#if successRate !== null}
+							<div
+								class={cn(
+									'text-3xl font-bold',
+									successRate >= 0.9 ? 'text-emerald-400' : 'text-amber-400'
+								)}
+							>
+								{(successRate * 100).toFixed(1)}%
+							</div>
+							{#if throughput}
+								<p class="mt-1 text-xs text-zinc-500">
+									{throughput.completed} done · {throughput.failed} failed (24h)
+								</p>
+							{/if}
+						{:else}
+							<div class="text-3xl font-bold text-zinc-500">—</div>
+							<p class="mt-1 text-xs text-zinc-500">No completed or failed jobs yet</p>
+						{/if}
 					</div>
 					<div class="glass-panel rounded-xl border border-zinc-800 p-5">
 						<div class="mb-3 flex items-center justify-between">
@@ -262,7 +308,14 @@
 								<Activity class="h-4 w-4" /> Total Chunks
 							</h3>
 						</div>
-						<div class="text-3xl font-bold text-zinc-100">142k</div>
+						<div class="text-3xl font-bold text-zinc-100">
+							{chunkCount === null ? '—' : chunkCount.toLocaleString('en-US')}
+						</div>
+						{#if claimCount !== null}
+							<p class="mt-1 text-xs text-zinc-500">
+								{claimCount.toLocaleString('en-US')} claims extracted
+							</p>
+						{/if}
 					</div>
 					<div class="glass-panel rounded-xl border border-zinc-800 p-5">
 						<div class="mb-3 flex items-center justify-between">
@@ -271,9 +324,12 @@
 							</h3>
 						</div>
 						<div class="flex items-baseline gap-2">
-							<div class="text-3xl font-bold text-zinc-100">2.4m</div>
-							<span class="text-xs text-zinc-500">Per 100 pages</span>
+							<div class="text-3xl font-bold text-zinc-100">{fmtMs(avgDurationMs)}</div>
+							<span class="text-xs text-zinc-500">Per job, queued → done</span>
 						</div>
+						{#if avgDurationMs === null}
+							<p class="mt-1 text-xs text-zinc-500">Appears once timed jobs complete</p>
+						{/if}
 					</div>
 				{/if}
 			</div>
@@ -500,6 +556,11 @@
 										>
 											{step.name}
 										</span>
+										{#if step.avgMs !== null}
+											<span class="ml-2 shrink-0 font-mono text-[10px] text-zinc-600">
+												{fmtMs(step.avgMs)} avg
+											</span>
+										{/if}
 									</div>
 									{#if step.status === 'running'}
 										<p class="mt-1 animate-pulse text-[10px] text-indigo-400 italic">Running...</p>

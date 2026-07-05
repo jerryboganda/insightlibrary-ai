@@ -12,21 +12,27 @@ import type {
 	Flashcard,
 	Folder,
 	Graph,
+	GraphStats,
 	HealthResponse,
 	Mcq,
 	NewClaim,
+	NormalizedClaim,
 	Notification,
 	Ontology,
 	ProcessingJob,
+	ProcessingStats,
 	ProviderId,
 	ReviewItem,
 	SearchResponse,
 	SessionResponse,
 	Source,
 	Topic,
+	TopicSection,
 	TopicVersion,
 	UsageMetrics,
-	User
+	User,
+	WebhookEndpoint,
+	WebhookTestResult
 } from '@insightlibrary/schemas';
 
 export interface ApiClientOptions {
@@ -97,6 +103,50 @@ export interface OrgSettingsUpdate {
 	settings?: { [K in keyof OrgSettingsValues]?: OrgSettingsValues[K] | null };
 }
 
+// ── Topic SSOT: versions / claims / verification ─────────────────────────────
+
+/** Normalized claim as served by GET /api/topics/[id]/claims (schema core + chain/provenance extras). */
+export type TopicClaim = NormalizedClaim & {
+	supersedesClaimId: string | null;
+	supersededByClaimId: string | null;
+	documentId: string | null;
+	createdAt: string;
+	updatedAt: string;
+};
+
+export type TopicVerifyReason = 'no_citation' | 'citation_unmatched' | 'not_entailed';
+
+export interface TopicVerifySentence {
+	/** JSONB claim id within the section (e.g. 's1_c0'). */
+	claimId: string;
+	content: string;
+	reason: TopicVerifyReason;
+}
+
+export interface TopicVerifySection {
+	sectionId: string;
+	title: string;
+	total: number;
+	supported: number;
+	faithfulness: number;
+	unsupported: TopicVerifySentence[];
+}
+
+/** POST /api/topics/[id]/verify — strict page verification without recomposing. */
+export interface TopicVerifyResult {
+	ok: boolean;
+	strict: boolean;
+	/** false = citation check only (no NLI provider configured). */
+	nliUsed: boolean;
+	faithfulness: number;
+	totalSentences: number;
+	supportedSentences: number;
+	unsupportedCount: number;
+	evidenceClaims: number;
+	sections: TopicVerifySection[];
+	verifiedAt: string;
+}
+
 export class ApiClient {
 	constructor(private readonly options: ApiClientOptions) {}
 
@@ -145,7 +195,16 @@ export class ApiClient {
 		storageKey?: string;
 		content?: string;
 	}) => this.request<Document>('/api/documents', { method: 'POST', body: JSON.stringify(input) });
+	// Sources registry (A5): ids double as citation tokens for provenance/coverage.
 	listSources = () => this.request<ListEnvelope<Source>>('/api/sources').then((r) => r.items);
+	/** Register a source (editor+). priority: 1 = highest for conflict resolution. */
+	createSource = (input: { name: string; author?: string; type?: string; priority?: number; date?: string }) =>
+		this.request<Source>('/api/sources', { method: 'POST', body: JSON.stringify(input) });
+	/** Edit a registered source (editor+); the id is immutable. */
+	updateSource = (
+		id: string,
+		patch: { name?: string; author?: string; type?: string; priority?: number; date?: string }
+	) => this.request<Source>(`/api/sources/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
 
 	// Hybrid search (FTS + vector RRF on Postgres, substring in memory)
 	search = (q: string) =>
@@ -173,8 +232,25 @@ export class ApiClient {
 			`/api/topics/${id}/regenerate`,
 			{ method: 'POST' }
 		);
-	listTopicVersions = (id: string) =>
-		this.request<ListEnvelope<TopicVersion>>(`/api/topics/${id}/versions`).then((r) => r.items);
+	/** Version history; pass includeSnapshot to also receive each version's sections. */
+	listTopicVersions = (id: string, opts?: { includeSnapshot?: boolean }) =>
+		this.request<ListEnvelope<TopicVersion & { sectionsSnapshot?: TopicSection[] }>>(
+			`/api/topics/${id}/versions${opts?.includeSnapshot ? '?include=snapshot' : ''}`
+		).then((r) => r.items);
+	/** Write version `version`'s snapshot back to the live SSOT; records a NEW version (editor+). */
+	restoreTopicVersion = (id: string, version: number) =>
+		this.request<{ ok: boolean; restoredFrom: number; version: number | null; faithfulness: number | null }>(
+			`/api/topics/${id}/versions/${version}/restore`,
+			{ method: 'POST' }
+		);
+	/** Normalized claims layer: type/confidence/tags, provenance, supersede chain (A6). */
+	getTopicClaims = (id: string, status?: NormalizedClaim['status']) =>
+		this.request<{ items: TopicClaim[]; total: number }>(
+			`/api/topics/${id}/claims${status ? `?status=${status}` : ''}`
+		);
+	/** Strict verification of the current page WITHOUT recomposing (B11). Read-only. */
+	verifyTopic = (id: string) =>
+		this.request<TopicVerifyResult>(`/api/topics/${id}/verify`, { method: 'POST' });
 
 	// Study / exam engine
 	listFlashcards = (topicId?: string) =>
@@ -276,11 +352,40 @@ export class ApiClient {
 	// Graph analytics
 	getGraphPageRank = () =>
 		this.request<ListEnvelope<{ id: string; label: string; score: number }>>('/api/graph/pagerank').then((r) => r.items);
-	// Figure / table (visual) retrieval
+	// Figure / table (visual) retrieval — folderId lets the search UI deep-link to the document.
 	searchFigures = (q: string) =>
-		this.request<ListEnvelope<{ id: string; documentId: string; page: number; kind: string; content: string; title: string }>>(
+		this.request<ListEnvelope<{ id: string; documentId: string; folderId: string; page: number; kind: string; content: string; title: string }>>(
 			`/api/figures?q=${encodeURIComponent(q)}`
 		).then((r) => r.items);
+	// Document parse structure: page/dimensions, block counts by kind, coverage rollup, live job state (A7/B8).
+	getDocumentStructure = (id: string) =>
+		this.request<{
+			source: 'postgres' | 'memory';
+			hasSource: boolean;
+			pages: { count: number; width: number | null; height: number | null } | null;
+			blocks: { total: number; byKind: Record<string, number> } | null;
+			coverage: {
+				total: number;
+				byStatus: Record<string, number>;
+				unaccountedPct: number;
+				chunkedPct: number;
+				claimedPct: number;
+			} | null;
+			chunks: number | null;
+			job: {
+				id: string;
+				stage: string;
+				progress: number;
+				message: string | null;
+				startedAt: string | null;
+				stages: Record<string, string> | null;
+			} | null;
+		}>(`/api/documents/${id}/structure`);
+	/** Presigned S3 GET url for the original uploaded file (B8). Browser tabs can hit the raw endpoint (302 redirect). */
+	getDocumentDownloadUrl = (id: string) =>
+		this.request<{ url: string; expiresIn: number | null }>(
+			`/api/documents/${id}/download?format=json`
+		);
 
 	// Hosted-tier admin: processing control
 	cancelJob = (id: string) => this.request<{ ok: true }>(`/api/processing/${id}/cancel`, { method: 'POST' });
@@ -359,17 +464,34 @@ export class ApiClient {
 	deleteApiKey = (id: string) => this.request<{ ok: true }>(`/api/api-keys/${id}`, { method: 'DELETE' });
 
 	// Webhooks
+	/** Items-only list (legacy callers). Use getWebhooks for delivery status + the supported-events selector. */
 	listWebhooks = () =>
-		this.request<ListEnvelope<{ id: string; url: string; event: string; active: boolean }>>('/api/webhooks').then((r) => r.items);
+		this.getWebhooks().then((r) => r.items);
+	/** Full envelope: endpoints (with delivery status) + the set of subscribable event names. */
+	getWebhooks = () =>
+		this.request<{ items: WebhookEndpoint[]; total: number; events: string[] }>('/api/webhooks');
+	/** Create an endpoint. `secret` is the ONE-TIME reveal of the HMAC signing secret (null pre-migration). */
 	createWebhook = (url: string, event?: string) =>
-		this.request<{ id: string; url: string; event: string; active: boolean }>('/api/webhooks', {
-			method: 'POST',
-			body: JSON.stringify({ url, event })
-		});
+		this.request<{ id: string; url: string; event: string; active: boolean; secret: string | null; signing: string }>(
+			'/api/webhooks',
+			{ method: 'POST', body: JSON.stringify({ url, event }) }
+		);
+	/** Edit url / event / active toggle (editor+). */
+	updateWebhook = (id: string, patch: { url?: string; event?: string; active?: boolean }) =>
+		this.request<WebhookEndpoint>(`/api/webhooks/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+	/** Fire a signed test delivery and report the endpoint's response (editor+). */
+	testWebhook = (id: string) =>
+		this.request<WebhookTestResult>(`/api/webhooks/${id}/test`, { method: 'POST' });
 	deleteWebhook = (id: string) => this.request<{ ok: true }>(`/api/webhooks/${id}`, { method: 'DELETE' });
 
 	// Notifications
 	archiveNotification = (id: string) => this.request<{ ok: true }>(`/api/notifications/${id}/archive`, { method: 'POST' });
+	/** Per-item mark read/unread (and optionally archive) — persists server-side (B29). */
+	updateNotification = (id: string, patch: { read?: boolean; archived?: boolean }) =>
+		this.request<{ ok: true; id: string; read: boolean; archived?: boolean; archivedPersisted?: boolean }>(
+			`/api/notifications/${id}`,
+			{ method: 'PATCH', body: JSON.stringify(patch) }
+		);
 
 	// Billing (Stripe)
 	getBillingStatus = () =>
@@ -378,6 +500,21 @@ export class ApiClient {
 		);
 	billingCheckout = () => this.request<{ url: string }>('/api/billing/checkout', { method: 'POST' });
 	billingPortal = () => this.request<{ url: string }>('/api/billing/portal', { method: 'POST' });
+	/** Recent invoices from Stripe (amounts in smallest currency unit). Empty when Stripe unconfigured. */
+	getBillingInvoices = () =>
+		this.request<{
+			configured: boolean;
+			invoices: Array<{
+				id: string;
+				number: string | null;
+				created: string;
+				total: number;
+				currency: string;
+				status: string;
+				hostedInvoiceUrl: string | null;
+				invoicePdf: string | null;
+			}>;
+		}>('/api/billing/invoices');
 
 	// Org settings (workspace identity + governance/pipeline/search configuration)
 	getOrgSettings = () => this.request<OrgSettingsResponse>('/api/org/settings');
@@ -392,7 +529,55 @@ export class ApiClient {
 	runEvaluation = () => this.request<EvaluationMetrics>('/api/evaluation/run', { method: 'POST' });
 	listProcessing = () =>
 		this.request<ListEnvelope<ProcessingJob>>('/api/processing').then((r) => r.items);
+	/** Real pipeline rollups: queue/stage counts, throughput, avg durations (B16). */
+	getProcessingStats = () => this.request<ProcessingStats>('/api/processing/stats');
+	/** Cheap graph counts (nodes/edges/communities/groups) — avoids fetching the full graph (B16/A3). */
+	getGraphStats = () => this.request<GraphStats>('/api/graph/stats');
+	/** Real storage numbers: DB size, per-table sizes, org-scoped counts, S3 prefix usage (C7). */
+	getStorageStats = () =>
+		this.request<{
+			source: 'postgres' | 'memory';
+			database: { totalBytes: number | null; tables: Record<string, number | null> } | null;
+			counts: {
+				documents: number | null;
+				chunks: number | null;
+				embeddedChunks: number | null;
+				docBlocks: number | null;
+				graphNodes: number | null;
+				graphEdges: number | null;
+				claims: number | null;
+			};
+			s3: {
+				configured: boolean;
+				prefix?: string;
+				bytes: number | null;
+				objects: number | null;
+				truncated?: boolean;
+				cachedAt?: string | null;
+			};
+		}>('/api/admin/storage-stats');
 	listAudit = () => this.request<ListEnvelope<AuditLog>>('/api/audit').then((r) => r.items);
+	/** Server-side paginated + filtered audit log (B32). `total` is the filtered count for pager math. */
+	listAuditPaged = (params?: {
+		limit?: number;
+		offset?: number;
+		from?: string;
+		to?: string;
+		action?: string;
+		actor?: string;
+		severity?: 'info' | 'warning' | 'critical';
+	}) => {
+		const qs = new URLSearchParams();
+		if (params) {
+			for (const [k, v] of Object.entries(params)) {
+				if (v !== undefined && v !== null && v !== '') qs.set(k, String(v));
+			}
+		}
+		const q = qs.toString();
+		return this.request<{ items: AuditLog[]; total: number; limit: number; offset: number }>(
+			`/api/audit${q ? `?${q}` : ''}`
+		);
+	};
 	listOntologies = () =>
 		this.request<ListEnvelope<Ontology>>('/api/ontologies').then((r) => r.items);
 	listUsers = () => this.request<ListEnvelope<User>>('/api/users').then((r) => r.items);

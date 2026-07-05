@@ -26,16 +26,40 @@ export interface ProgressEvent {
 export async function persistProgress(e: ProgressEvent): Promise<void> {
 	const db = getDb();
 	if (!db) return;
-	await db.execute(sql`
-		INSERT INTO processing_jobs (id, document_id, document_title, stage, progress, message)
-		VALUES (${`pj_${e.documentId}`}, ${e.documentId}, ${e.documentTitle}, ${e.stage}, ${e.progress}, ${e.message})
-		ON CONFLICT (id) DO UPDATE
-		SET stage = EXCLUDED.stage,
-		    progress = EXCLUDED.progress,
-		    message = EXCLUDED.message,
-		    document_title = EXCLUDED.document_title
-		WHERE processing_jobs.stage <> 'failed' OR EXCLUDED.stage IN ('queued', 'failed')
-	`);
+	try {
+		// Stage-timing variant (gap B16): `stages` jsonb (migration 0011) keeps the
+		// FIRST-seen timestamp per stage for this run — merge order puts the
+		// existing map on the right so already-recorded stages win. A fresh
+		// 'queued' (enqueue/retry) resets the map and started_at so durations and
+		// throughput reflect the current run, not a previous attempt.
+		await db.execute(sql`
+			INSERT INTO processing_jobs (id, document_id, document_title, stage, progress, message, stages)
+			VALUES (${`pj_${e.documentId}`}, ${e.documentId}, ${e.documentTitle}, ${e.stage}, ${e.progress}, ${e.message},
+			        jsonb_build_object(${e.stage}::text, to_jsonb(now())))
+			ON CONFLICT (id) DO UPDATE
+			SET stage = EXCLUDED.stage,
+			    progress = EXCLUDED.progress,
+			    message = EXCLUDED.message,
+			    document_title = EXCLUDED.document_title,
+			    stages = CASE WHEN EXCLUDED.stage = 'queued'
+			                  THEN EXCLUDED.stages
+			                  ELSE EXCLUDED.stages || COALESCE(processing_jobs.stages, '{}'::jsonb) END,
+			    started_at = CASE WHEN EXCLUDED.stage = 'queued' THEN now() ELSE processing_jobs.started_at END
+			WHERE processing_jobs.stage <> 'failed' OR EXCLUDED.stage IN ('queued', 'failed')
+		`);
+	} catch {
+		// stages column not migrated yet (0011) — original guarded upsert.
+		await db.execute(sql`
+			INSERT INTO processing_jobs (id, document_id, document_title, stage, progress, message)
+			VALUES (${`pj_${e.documentId}`}, ${e.documentId}, ${e.documentTitle}, ${e.stage}, ${e.progress}, ${e.message})
+			ON CONFLICT (id) DO UPDATE
+			SET stage = EXCLUDED.stage,
+			    progress = EXCLUDED.progress,
+			    message = EXCLUDED.message,
+			    document_title = EXCLUDED.document_title
+			WHERE processing_jobs.stage <> 'failed' OR EXCLUDED.stage IN ('queued', 'failed')
+		`);
+	}
 }
 
 /**

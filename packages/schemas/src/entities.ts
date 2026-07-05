@@ -338,7 +338,9 @@ export const notificationSchema = z.object({
 	description: z.string(),
 	time: z.string(),
 	read: z.boolean(),
-	action: z.string().nullable()
+	action: z.string().nullable(),
+	/** Per-item archive state (B29). Absent on pre-0011 deployments/seed data. */
+	archived: z.boolean().optional()
 });
 export type Notification = z.infer<typeof notificationSchema>;
 
@@ -406,3 +408,76 @@ export const topicVersionSchema = z.object({
 	createdAt: z.string()
 });
 export type TopicVersion = z.infer<typeof topicVersionSchema>;
+
+// ── Webhooks (hosted tier; GET /api/webhooks) ───────────────────────────────
+export const webhookEndpointSchema = z.object({
+	id: z.string(),
+	url: z.string(),
+	/** '*' | exact event name | 'category.*' prefix pattern. */
+	event: z.string(),
+	active: z.boolean(),
+	createdAt: z.string().nullable().optional(),
+	/** True when an HMAC signing secret is stored (secret itself never re-shown). */
+	secretSet: z.boolean().optional(),
+	lastDeliveryAt: z.string().nullable().optional(),
+	/** '200' | '503' | 'error: timeout' | null when never delivered. */
+	lastStatus: z.string().nullable().optional()
+});
+export type WebhookEndpoint = z.infer<typeof webhookEndpointSchema>;
+
+/** POST /api/webhooks/[id]/test result. */
+export const webhookTestResultSchema = z.object({
+	ok: z.boolean(),
+	status: z.number(),
+	statusText: z.string(),
+	durationMs: z.number(),
+	signed: z.boolean(),
+	error: z.string().nullable()
+});
+export type WebhookTestResult = z.infer<typeof webhookTestResultSchema>;
+
+// ── Ops rollups (GET /api/processing/stats, GET /api/graph/stats) ───────────
+export const processingStatsSchema = z.object({
+	source: z.enum(['postgres', 'memory']),
+	jobs: z.object({
+		total: z.number().int(),
+		queued: z.number().int(),
+		active: z.number().int(),
+		completed: z.number().int(),
+		failed: z.number().int(),
+		byStage: z.record(z.string(), z.number())
+	}),
+	documents: z.object({
+		total: z.number().int(),
+		byStatus: z.record(z.string(), z.number())
+	}),
+	/** Null when the backing table is unavailable (memory mode / pre-migration). */
+	chunks: z.number().nullable(),
+	claims: z.number().nullable(),
+	/** done / (done + failed); null when nothing terminal has run yet. */
+	successRate: z.number().nullable(),
+	/** Avg queued→done wall time; null before per-stage timestamps exist (0011). */
+	avgDurationMs: z.number().nullable(),
+	avgStageDurationsMs: z.record(z.string(), z.number()).nullable(),
+	throughput24h: z.object({ completed: z.number().int(), failed: z.number().int() })
+});
+export type ProcessingStats = z.infer<typeof processingStatsSchema>;
+
+export const graphStatsSchema = z.object({
+	source: z.enum(['postgres', 'memory']),
+	nodes: z.number().int(),
+	edges: z.number().int(),
+	/** Connected components with ≥2 members; null if the computation failed. */
+	communities: z.number().int().nullable(),
+	groups: z.array(z.object({ group: z.string(), count: z.number().int() }))
+});
+export type GraphStats = z.infer<typeof graphStatsSchema>;
+
+/** Claim settlement summary returned by POST /api/review/[id] (additive). */
+export const conflictResolutionSchema = z.object({
+	resolved: z.boolean(),
+	winnerClaimId: z.string().nullable(),
+	loserClaimId: z.string().nullable(),
+	detail: z.string()
+});
+export type ConflictResolution = z.infer<typeof conflictResolutionSchema>;

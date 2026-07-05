@@ -1,7 +1,9 @@
 <script lang="ts">
-	import { Key, Plus, Copy, Check, Webhook, X, Trash2 } from '@lucide/svelte';
+	import { Key, Plus, Copy, Check, Webhook, X, Trash2, Send, Loader2 } from '@lucide/svelte';
 	import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
 	import { api } from '$lib/api';
+	import { cn } from '$lib/utils';
+	import type { WebhookTestResult } from '@insightlibrary/schemas';
 
 	const queryClient = useQueryClient();
 
@@ -12,12 +14,14 @@
 	});
 	const apiKeys = $derived($keysQuery.data ?? []);
 
-	// Live webhooks — fields: id, url, event, active.
+	// Live webhooks envelope — items carry secretSet/lastDeliveryAt/lastStatus and
+	// the envelope lists the supported event names for the selector.
 	const webhooksQuery = createQuery({
 		queryKey: ['webhooks'],
-		queryFn: () => api.listWebhooks()
+		queryFn: () => api.getWebhooks()
 	});
-	const webhooks = $derived($webhooksQuery.data ?? []);
+	const webhooks = $derived($webhooksQuery.data?.items ?? []);
+	const webhookEvents = $derived($webhooksQuery.data?.events ?? []);
 
 	// ── Create API key ────────────────────────────────────────────────────────────
 	// The full token is only returned once, so surface it in a one-time notice box.
@@ -58,12 +62,22 @@
 
 	// ── Add webhook endpoint ──────────────────────────────────────────────────────
 	let newWebhookUrl = $state('');
+	let newWebhookEvent = $state('*');
 	let showWebhookInput = $state(false);
+	// One-time reveal of the HMAC signing secret returned by create (never re-shown).
+	let revealedWebhookSecret = $state<string | null>(null);
+	let webhookSecretShown = $state(false);
+	let webhookSecretCopied = $state(false);
 
 	const createEndpoint = createMutation({
-		mutationFn: (url: string) => api.createWebhook(url),
-		onSuccess: () => {
+		mutationFn: (input: { url: string; event: string }) =>
+			api.createWebhook(input.url, input.event),
+		onSuccess: (created) => {
+			revealedWebhookSecret = created.secret;
+			webhookSecretShown = true;
+			webhookSecretCopied = false;
 			newWebhookUrl = '';
+			newWebhookEvent = '*';
 			showWebhookInput = false;
 			queryClient.invalidateQueries({ queryKey: ['webhooks'] });
 		}
@@ -72,13 +86,65 @@
 	function submitCreateEndpoint() {
 		const url = newWebhookUrl.trim();
 		if (!url) return;
-		$createEndpoint.mutate(url);
+		$createEndpoint.mutate({ url, event: newWebhookEvent });
 	}
+
+	function copyWebhookSecret() {
+		if (!revealedWebhookSecret) return;
+		navigator.clipboard.writeText(revealedWebhookSecret);
+		webhookSecretCopied = true;
+		setTimeout(() => (webhookSecretCopied = false), 2000);
+	}
+
+	// Edit event / toggle active via PATCH /api/webhooks/[id].
+	const updateEndpoint = createMutation({
+		mutationFn: (input: { id: string; patch: { url?: string; event?: string; active?: boolean } }) =>
+			api.updateWebhook(input.id, input.patch),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ['webhooks'] })
+	});
 
 	const deleteEndpoint = createMutation({
 		mutationFn: (id: string) => api.deleteWebhook(id),
 		onSuccess: () => queryClient.invalidateQueries({ queryKey: ['webhooks'] })
 	});
+
+	// Test delivery: POST /api/webhooks/[id]/test performs a real (signed when a
+	// secret exists) HTTP delivery and returns the outcome — shown honestly per row.
+	let testingId = $state<string | null>(null);
+	let testResults = $state<Record<string, WebhookTestResult | { transportError: string }>>({});
+
+	const testEndpoint = createMutation({
+		mutationFn: (id: string) => api.testWebhook(id).then((result) => ({ id, result })),
+		onMutate: (id: string) => {
+			testingId = id;
+			delete testResults[id];
+		},
+		onSuccess: ({ id, result }) => {
+			testResults[id] = result;
+		},
+		onError: (err, id) => {
+			testResults[id] = {
+				transportError: err instanceof Error ? err.message : 'Test request failed'
+			};
+		},
+		onSettled: () => {
+			testingId = null;
+			// The test delivery updates lastDeliveryAt/lastStatus server-side.
+			queryClient.invalidateQueries({ queryKey: ['webhooks'] });
+		}
+	});
+
+	function fmtDate(iso: string | null | undefined): string {
+		if (!iso) return 'never';
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return iso;
+		return d.toLocaleString(undefined, {
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
 </script>
 
 <div class="max-w-5xl space-y-8 p-6 md:p-8">
@@ -264,7 +330,7 @@
 						e.preventDefault();
 						submitCreateEndpoint();
 					}}
-					class="flex items-center gap-2"
+					class="flex flex-wrap items-center gap-2"
 				>
 					<!-- svelte-ignore a11y_autofocus -->
 					<input
@@ -274,6 +340,16 @@
 						placeholder="https://example.com/hook"
 						class="w-56 rounded-md border border-zinc-800 bg-zinc-950/50 px-3 py-1.5 text-sm text-zinc-200 focus:border-indigo-500/50 focus:outline-none"
 					/>
+					<select
+						bind:value={newWebhookEvent}
+						aria-label="Subscribed event"
+						class="rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1.5 text-sm text-zinc-200 focus:border-indigo-500/50 focus:outline-none"
+					>
+						<option value="*">All events</option>
+						{#each webhookEvents as ev (ev)}
+							<option value={ev}>{ev}</option>
+						{/each}
+					</select>
 					<button
 						type="submit"
 						disabled={$createEndpoint.isPending || !newWebhookUrl.trim()}
@@ -286,6 +362,7 @@
 						onclick={() => {
 							showWebhookInput = false;
 							newWebhookUrl = '';
+							newWebhookEvent = '*';
 						}}
 						class="rounded-md p-1 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
 						aria-label="Cancel"
@@ -301,6 +378,63 @@
 				>
 			{/if}
 		</div>
+		<!-- One-time signing-secret reveal after create -->
+		{#if webhookSecretShown}
+			<div class="border-b border-zinc-800 bg-emerald-500/5 p-5">
+				<div class="flex items-start justify-between gap-4">
+					<div class="min-w-0">
+						{#if revealedWebhookSecret}
+							<h3 class="flex items-center gap-2 text-sm font-semibold text-emerald-300">
+								<Check class="h-4 w-4" /> Webhook created — signing secret
+							</h3>
+							<p class="mt-1 text-xs text-zinc-400">
+								Copy this secret now — it is shown only once. Deliveries carry
+								<code class="rounded bg-zinc-900 px-1 py-0.5 font-mono text-[10px] text-zinc-400"
+									>x-insight-signature: sha256=HMAC_SHA256(secret, body)</code
+								>
+								so your receiver can verify authenticity.
+							</p>
+							<div class="mt-3 flex items-center gap-2">
+								<code
+									class="min-w-0 flex-1 truncate rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2 font-mono text-xs text-emerald-200"
+								>
+									{revealedWebhookSecret}
+								</code>
+								<button
+									onclick={copyWebhookSecret}
+									class="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-200 transition-colors hover:border-emerald-500/40 hover:text-emerald-300"
+								>
+									{#if webhookSecretCopied}
+										<Check class="h-3.5 w-3.5 text-emerald-400" /> Copied
+									{:else}
+										<Copy class="h-3.5 w-3.5" /> Copy
+									{/if}
+								</button>
+							</div>
+						{:else}
+							<h3 class="flex items-center gap-2 text-sm font-semibold text-amber-300">
+								<Check class="h-4 w-4" /> Webhook created (unsigned)
+							</h3>
+							<p class="mt-1 text-xs text-zinc-400">
+								This deployment cannot sign deliveries yet — payloads are sent as plain POSTs
+								without an <code class="font-mono">x-insight-signature</code> header.
+							</p>
+						{/if}
+					</div>
+					<button
+						onclick={() => {
+							webhookSecretShown = false;
+							revealedWebhookSecret = null;
+						}}
+						class="-mt-1 rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+						aria-label="Dismiss"
+					>
+						<X class="h-4 w-4" />
+					</button>
+				</div>
+			</div>
+		{/if}
+
 		{#if $webhooksQuery.isLoading}
 			<div class="p-6 py-12 text-center text-sm text-zinc-500">Loading webhooks…</div>
 		{:else if webhooks.length === 0}
@@ -312,32 +446,125 @@
 				</div>
 				<h3 class="mb-1 text-sm font-medium text-zinc-200">No webhooks configured</h3>
 				<p class="mx-auto max-w-sm text-xs text-zinc-500">
-					Set up webhooks to receive real-time HTTP payloads when SSOT documents are merged or conflicts
-					require review.
+					Set up webhooks to receive real-time HTTP payloads when documents finish indexing,
+					conflicts are detected, or reviews are resolved.
 				</p>
 			</div>
 		{:else}
 			<ul class="divide-y divide-zinc-800/50">
 				{#each webhooks as hook (hook.id)}
-					<li class="flex items-center justify-between gap-4 px-6 py-4">
-						<div class="min-w-0">
-							<p class="truncate font-mono text-sm text-zinc-200">{hook.url}</p>
-							<p class="mt-0.5 text-xs text-zinc-500">
-								{hook.event}
-								·
-								<span class={hook.active ? 'text-emerald-400' : 'text-zinc-500'}>
-									{hook.active ? 'Active' : 'Inactive'}
-								</span>
-							</p>
+					{@const test = testResults[hook.id]}
+					<li class="px-6 py-4">
+						<div class="flex flex-wrap items-center justify-between gap-4">
+							<div class="min-w-0 flex-1">
+								<p class="truncate font-mono text-sm text-zinc-200">{hook.url}</p>
+								<p class="mt-0.5 text-xs text-zinc-500">
+									<span class={hook.active ? 'text-emerald-400' : 'text-zinc-500'}>
+										{hook.active ? 'Active' : 'Paused'}
+									</span>
+									· {hook.secretSet ? 'signed' : 'unsigned'}
+									· last delivery: {fmtDate(hook.lastDeliveryAt)}{hook.lastStatus
+										? ` (${hook.lastStatus})`
+										: ''}
+								</p>
+							</div>
+							<div class="flex shrink-0 items-center gap-2">
+								<!-- Event subscription (PATCH on change) -->
+								<select
+									value={hook.event}
+									aria-label="Subscribed event"
+									disabled={$updateEndpoint.isPending}
+									onchange={(e) =>
+										$updateEndpoint.mutate({
+											id: hook.id,
+											patch: { event: e.currentTarget.value }
+										})}
+									class="rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1.5 text-xs text-zinc-300 focus:border-indigo-500/50 focus:outline-none disabled:opacity-50"
+								>
+									<option value="*">All events</option>
+									{#each webhookEvents as ev (ev)}
+										<option value={ev}>{ev}</option>
+									{/each}
+									{#if hook.event !== '*' && !webhookEvents.includes(hook.event)}
+										<option value={hook.event}>{hook.event}</option>
+									{/if}
+								</select>
+
+								<!-- Active toggle (PATCH) -->
+								<button
+									type="button"
+									role="switch"
+									aria-label="Webhook active"
+									aria-checked={hook.active}
+									disabled={$updateEndpoint.isPending}
+									onclick={() =>
+										$updateEndpoint.mutate({ id: hook.id, patch: { active: !hook.active } })}
+									class={cn(
+										'relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:opacity-50',
+										hook.active ? 'border-emerald-500 bg-emerald-500' : 'border-zinc-700 bg-zinc-700'
+									)}
+								>
+									<span
+										class={cn(
+											'absolute top-[2px] h-4 w-4 rounded-full bg-white transition-all',
+											hook.active ? 'left-[18px]' : 'left-[2px]'
+										)}
+									></span>
+								</button>
+
+								<!-- Send test event (real delivery) -->
+								<button
+									onclick={() => $testEndpoint.mutate(hook.id)}
+									disabled={testingId !== null}
+									class="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-indigo-500/40 hover:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-50"
+								>
+									{#if testingId === hook.id}
+										<Loader2 class="h-3.5 w-3.5 animate-spin" /> Sending…
+									{:else}
+										<Send class="h-3.5 w-3.5" /> Test
+									{/if}
+								</button>
+
+								<button
+									onclick={() => $deleteEndpoint.mutate(hook.id)}
+									disabled={$deleteEndpoint.isPending}
+									class="shrink-0 rounded-md p-2 text-zinc-500 transition-colors hover:bg-rose-500/10 hover:text-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+									aria-label="Delete webhook"
+								>
+									<Trash2 class="h-4 w-4" />
+								</button>
+							</div>
 						</div>
-						<button
-							onclick={() => $deleteEndpoint.mutate(hook.id)}
-							disabled={$deleteEndpoint.isPending}
-							class="shrink-0 rounded-md p-2 text-zinc-500 transition-colors hover:bg-rose-500/10 hover:text-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
-							aria-label="Delete webhook"
-						>
-							<Trash2 class="h-4 w-4" />
-						</button>
+
+						<!-- Test delivery outcome (honest: shows the receiver's actual response) -->
+						{#if test}
+							{#if 'transportError' in test}
+								<div
+									class="mt-3 rounded-md border border-rose-500/20 bg-rose-500/5 px-3 py-2 font-mono text-xs text-rose-300"
+								>
+									Test failed: {test.transportError}
+								</div>
+							{:else}
+								<div
+									class={cn(
+										'mt-3 rounded-md border px-3 py-2 font-mono text-xs',
+										test.ok
+											? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-300'
+											: 'border-rose-500/20 bg-rose-500/5 text-rose-300'
+									)}
+								>
+									{#if test.status > 0}
+										{test.status} {test.statusText}
+									{:else}
+										delivery failed
+									{/if}
+									· {test.durationMs}ms · {test.signed ? 'signed' : 'unsigned'}
+									{#if test.error}
+										· {test.error}
+									{/if}
+								</div>
+							{/if}
+						{/if}
 					</li>
 				{/each}
 			</ul>

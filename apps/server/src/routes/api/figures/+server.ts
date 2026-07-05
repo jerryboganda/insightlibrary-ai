@@ -13,8 +13,8 @@ export const GET: RequestHandler = async ({ url }) => {
 	const db = getDb();
 	if (!db) return json({ items: [], total: 0 });
 	const like = `%${q}%`;
-	const rows = await db.execute<{ id: string; document_id: string; page: number; kind: string; content: string; title: string }>(sql`
-		SELECT b.id, b.document_id, b.page_no AS page, b.kind, b.content, d.title
+	const rows = await db.execute<{ id: string; document_id: string; folder_id: string; page: number; kind: string; content: string; title: string }>(sql`
+		SELECT b.id, b.document_id, d.folder_id AS folder_id, b.page_no AS page, b.kind, b.content, d.title
 		FROM doc_blocks b JOIN documents d ON d.id = b.document_id
 		WHERE b.kind IN ('figure', 'table') ${q ? sql`AND b.content ILIKE ${like}` : sql``}
 		ORDER BY b.document_id, b.page_no
@@ -23,6 +23,9 @@ export const GET: RequestHandler = async ({ url }) => {
 	const items = rows.rows.map((r) => ({
 		id: r.id,
 		documentId: r.document_id,
+		// Lets the search Figures tab deep-link to /folders/{folderId}/{documentId}
+		// without an extra per-row document lookup.
+		folderId: r.folder_id,
 		page: r.page,
 		kind: r.kind,
 		content: r.content,

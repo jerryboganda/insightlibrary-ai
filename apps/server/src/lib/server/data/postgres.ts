@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, lte, sql } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import type {
@@ -31,6 +31,7 @@ import { expandQuery } from '../ai/expansion';
 import { computeCoverage } from './coverage';
 import { getOrgSettings } from '../org-settings';
 import { normalizeAppRole } from '../auth-config';
+import { recordAiUsage } from '../usage/metering';
 
 /**
  * Directory row returned by GET /api/users — the wire `User` enriched with the
@@ -287,6 +288,7 @@ export class PostgresRepository implements Repository {
 	async search(query: string): Promise<{ results: SearchResult[]; mode: 'hybrid' | 'text' }> {
 		const q = query.trim();
 		if (!q) return { results: [], mode: 'text' };
+		const startedAt = Date.now();
 
 		// Self-sufficient FTS: ensure the generated tsvector column + GIN index
 		// exist even if the DB was created by db:push without running db:seed.
@@ -297,7 +299,9 @@ export class PostgresRepository implements Repository {
 		const armLimit = cfg?.searchCandidates ?? 30;
 		const topK = cfg?.searchTopK ?? 20;
 		const snippetLen = cfg?.searchSnippetLength ?? 240;
-		const qvec = await embedText(q);
+		// Never 500 a search over embedding problems (missing key logs once inside
+		// embedText and returns null; API/budget errors degrade to lexical-only).
+		const qvec = await embedText(q, { orgId: this.orgId }).catch(() => null);
 		const fused = new Map<string, { score: number; documentId: string; content: string; title: string; folderId: string }>();
 
 		// FTS arm.
@@ -434,6 +438,19 @@ export class PostgresRepository implements Repository {
 			}
 		}
 
+		// Metering (B17 follow-up): count the search itself as a zero-cost internal
+		// event so the usage dashboard's "Hybrid Searches" rollup is real. The paid
+		// embedding call (if any) was already metered inside embedText.
+		recordAiUsage({
+			orgId: this.orgId,
+			provider: 'internal',
+			model: mode,
+			task: 'search',
+			charsIn: q.length,
+			costUsd: 0,
+			durationMs: Date.now() - startedAt
+		});
+
 		return { results, mode };
 	}
 
@@ -461,9 +478,27 @@ export class PostgresRepository implements Repository {
 	async getGraph(): Promise<Graph> {
 		const nodes = await this.db.select().from(schema.graphNodes).where(eq(schema.graphNodes.orgId, this.orgId));
 		const edges = await this.db.select().from(schema.graphEdges).where(eq(schema.graphEdges.orgId, this.orgId));
+		// Additive semantic fields (all optional in graphSchema): node label/kind/
+		// concept grounding + edge relation/weight/claim provenance, so the graph
+		// UI can render real semantics instead of bare ids.
 		return {
-			nodes: nodes.map((n) => ({ id: n.id, group: n.group, size: n.size })),
-			edges: edges.map((e) => ({ source: e.source, target: e.target, label: e.label }))
+			nodes: nodes.map((n) => ({
+				id: n.id,
+				group: n.group,
+				size: n.size,
+				kind: n.kind,
+				label: n.label || n.id,
+				canonicalConceptId: n.canonicalConceptId ?? null,
+				description: n.description
+			})),
+			edges: edges.map((e) => ({
+				source: e.source,
+				target: e.target,
+				label: e.label,
+				rel: e.rel,
+				weight: e.weight,
+				sourceClaimId: e.sourceClaimId ?? null
+			}))
 		};
 	}
 
@@ -544,16 +579,65 @@ export class PostgresRepository implements Repository {
 			message: r.message
 		}));
 	}
-	async listAudit(): Promise<AuditLog[]> {
-		const rows = await this.db.select().from(schema.auditLogs).where(eq(schema.auditLogs.orgId, this.orgId));
-		return rows.map((r) => ({
+	private mapAudit(r: typeof schema.auditLogs.$inferSelect): AuditLog {
+		return {
 			id: r.id,
 			actor: r.actor,
 			action: r.action,
 			target: r.target,
 			timestamp: r.timestamp.toISOString(),
 			severity: r.severity as AuditLog['severity']
-		}));
+		};
+	}
+	async listAudit(): Promise<AuditLog[]> {
+		const rows = await this.db
+			.select()
+			.from(schema.auditLogs)
+			.where(eq(schema.auditLogs.orgId, this.orgId))
+			.orderBy(desc(schema.auditLogs.timestamp));
+		return rows.map((r) => this.mapAudit(r));
+	}
+	/**
+	 * Server-side audit pagination + filters (gap B32). Not part of the shared
+	 * Repository interface — the /api/audit route feature-detects this method
+	 * and falls back to in-route filtering over listAudit() for the seed repo.
+	 */
+	async listAuditPaged(opts: {
+		limit?: number;
+		offset?: number;
+		/** ISO timestamps (inclusive). */
+		from?: string;
+		to?: string;
+		/** Substring match on the action name (e.g. 'documents.create'). */
+		action?: string;
+		/** Substring match on the actor (email / api-key principal). */
+		actor?: string;
+		severity?: 'info' | 'warning' | 'critical';
+	}): Promise<{ items: AuditLog[]; total: number; limit: number; offset: number }> {
+		const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 200), 1), 500);
+		const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+		const conds = [eq(schema.auditLogs.orgId, this.orgId)];
+		const from = opts.from ? new Date(opts.from) : null;
+		if (from && !Number.isNaN(from.getTime())) conds.push(gte(schema.auditLogs.timestamp, from));
+		const to = opts.to ? new Date(opts.to) : null;
+		if (to && !Number.isNaN(to.getTime())) conds.push(lte(schema.auditLogs.timestamp, to));
+		if (opts.action) conds.push(ilike(schema.auditLogs.action, `%${opts.action}%`));
+		if (opts.actor) conds.push(ilike(schema.auditLogs.actor, `%${opts.actor}%`));
+		if (opts.severity) conds.push(eq(schema.auditLogs.severity, opts.severity));
+		const where = and(...conds);
+
+		const [{ total }] = await this.db
+			.select({ total: sql<number>`count(*)::int` })
+			.from(schema.auditLogs)
+			.where(where);
+		const rows = await this.db
+			.select()
+			.from(schema.auditLogs)
+			.where(where)
+			.orderBy(desc(schema.auditLogs.timestamp))
+			.limit(limit)
+			.offset(offset);
+		return { items: rows.map((r) => this.mapAudit(r)), total: Number(total), limit, offset };
 	}
 	async listOntologies(): Promise<Ontology[]> {
 		const rows = await this.db.select().from(schema.ontologies).where(eq(schema.ontologies.orgId, this.orgId));
@@ -650,16 +734,49 @@ export class PostgresRepository implements Repository {
 	}
 
 	async listNotifications(): Promise<Notification[]> {
-		const rows = await this.db.select().from(schema.notifications).where(eq(schema.notifications.orgId, this.orgId));
-		return rows.map((r) => ({
-			id: r.id,
-			type: r.type as Notification['type'],
-			title: r.title,
-			description: r.description,
-			time: r.createdAt.toISOString(),
-			read: r.read,
-			action: r.action
-		}));
+		// Archived rows (B29, column added in 0011) are excluded from the feed;
+		// raw SQL keeps this working on deployments that predate the migration.
+		try {
+			const res = await this.db.execute<{
+				id: string;
+				type: string;
+				title: string;
+				description: string;
+				action: string | null;
+				read: boolean;
+				created_at: Date | string;
+			}>(sql`
+				SELECT id, type, title, description, action, read, created_at
+				FROM notifications
+				WHERE org_id = ${this.orgId} AND COALESCE(archived, false) = false
+				ORDER BY created_at DESC
+			`);
+			return res.rows.map((r) => ({
+				id: r.id,
+				type: r.type as Notification['type'],
+				title: r.title,
+				description: r.description,
+				time: new Date(r.created_at).toISOString(),
+				read: r.read,
+				action: r.action,
+				archived: false
+			}));
+		} catch {
+			const rows = await this.db
+				.select()
+				.from(schema.notifications)
+				.where(eq(schema.notifications.orgId, this.orgId))
+				.orderBy(desc(schema.notifications.createdAt));
+			return rows.map((r) => ({
+				id: r.id,
+				type: r.type as Notification['type'],
+				title: r.title,
+				description: r.description,
+				time: r.createdAt.toISOString(),
+				read: r.read,
+				action: r.action
+			}));
+		}
 	}
 	async markAllNotificationsRead(): Promise<void> {
 		await this.db
