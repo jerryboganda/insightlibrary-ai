@@ -22,12 +22,19 @@ const CONTENT_TYPES: Record<string, string> = {
 	epub: 'application/epub+zip'
 };
 
-export const GET: RequestHandler = async ({ params, url }) => {
+export const GET: RequestHandler = async ({ params, url, locals }) => {
 	const db = getDb();
 	if (!db) throw error(404, 'No source file stored for this document (memory mode)');
 
+	// Org-scope the lookup the same way getDocument()/storage-stats do, so this
+	// file-serving route can't be used to read another tenant's documents once
+	// the multi-org auth path is enabled (matches the app's single-org default).
+	const orgId = locals.user?.orgId || 'org_1';
 	const res = await db.execute<{ storage_key: string | null; title: string; type: string }>(
-		sql`SELECT storage_key, title, type FROM documents WHERE id = ${params.id}`
+		sql`SELECT d.storage_key, d.title, d.type
+		    FROM documents d
+		    JOIN folders f ON f.id = d.folder_id
+		    WHERE d.id = ${params.id} AND f.org_id = ${orgId}`
 	);
 	const doc = res.rows[0];
 	if (!doc) throw error(404, 'Document not found');

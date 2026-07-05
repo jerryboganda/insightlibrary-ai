@@ -69,7 +69,12 @@
 		if (row.cells.length > columns.length) row.cells.length = columns.length;
 	}
 
+	// Must match compareMatrixSchema.columns/.cells .max(12) on the server; adding
+	// past it would make every autosave 400 and silently drop the extra columns.
+	const MAX_COLUMNS = 12;
+	const atColumnCap = $derived(columns.length >= MAX_COLUMNS);
 	function addColumn() {
+		if (columns.length >= MAX_COLUMNS) return;
 		columns = [...columns, `Source ${columns.length + 1}`];
 		for (const r of rows) r.cells.push({ text: '' });
 		markDirty();
@@ -106,6 +111,11 @@
 			dirty = false;
 			queryClient.setQueryData(['research', 'project', projectId], updated);
 			queryClient.invalidateQueries({ queryKey: ['research', 'projects'] });
+		},
+		onError: () => {
+			// Stop the pending autosave timer so a rejected write doesn't retry-loop
+			// on every keystroke; the next explicit Save (or edit) will try again.
+			clearTimeout(saveTimer);
 		}
 	});
 
@@ -195,7 +205,9 @@
 						This matrix is empty. Add source columns and concept rows to begin comparing.
 					</p>
 					<div class="mt-4 flex justify-center gap-3">
-						<Button variant="outline" onclick={addColumn}><Plus class="h-4 w-4" /> Add Column</Button>
+						<Button variant="outline" onclick={addColumn} disabled={atColumnCap}
+						><Plus class="h-4 w-4" /> Add Column</Button
+					>
 						<Button variant="outline" onclick={addRow}><Plus class="h-4 w-4" /> Add Row</Button>
 					</div>
 				</div>
@@ -228,7 +240,9 @@
 									<th class="w-12 border-l border-zinc-800/50 px-2 py-3 text-center">
 										<button
 											onclick={addColumn}
-											class="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-indigo-400"
+											disabled={atColumnCap}
+											title={atColumnCap ? 'Maximum of 12 sources' : 'Add column'}
+											class="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-indigo-400 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-500"
 											aria-label="Add column"
 										>
 											<Plus class="h-4 w-4" />
