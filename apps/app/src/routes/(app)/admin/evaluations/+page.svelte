@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { createQuery } from '@tanstack/svelte-query';
+	import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
 	import { Activity, Beaker, CheckCircle2, AlertTriangle, XCircle } from '@lucide/svelte';
 	import { fade, fly } from 'svelte/transition';
 	import { api } from '$lib/api';
@@ -8,6 +8,12 @@
 	import type { EvaluationMetrics } from '@insightlibrary/schemas';
 
 	const evaluation = createQuery({ queryKey: ['evaluation'], queryFn: () => api.getEvaluation() });
+
+	const queryClient = useQueryClient();
+	const runEval = createMutation({
+		mutationFn: () => api.runEvaluation(),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ['evaluation'] })
+	});
 
 	// Metric cards derived from the live evaluation feed. `good` marks a healthy direction;
 	// hallucination is inverted (lower is better).
@@ -77,9 +83,11 @@
 				</p>
 			</div>
 			<button
-				class="flex items-center gap-2 rounded-md border border-indigo-500/50 bg-zinc-950 px-4 py-2 text-sm font-medium text-indigo-400 transition-colors hover:bg-indigo-500/10"
+				onclick={() => $runEval.mutate()}
+				disabled={$runEval.isPending}
+				class="flex items-center gap-2 rounded-md border border-indigo-500/50 bg-zinc-950 px-4 py-2 text-sm font-medium text-indigo-400 transition-colors hover:bg-indigo-500/10 disabled:opacity-50"
 			>
-				<Beaker class="h-4 w-4" /> Run Manual Eval
+				<Beaker class="h-4 w-4" /> {$runEval.isPending ? 'Running…' : 'Run Manual Eval'}
 			</button>
 		</header>
 

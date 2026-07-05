@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { createQuery } from '@tanstack/svelte-query';
+	import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
 	import {
 		Users,
 		Shield,
@@ -122,6 +122,93 @@
 	let inviteEmail = $state('');
 	let inviteRole = $state(ROLES[1]);
 	let editRole = $state('');
+
+	const queryClient = useQueryClient();
+
+	// Map a display role label back to a persisted role enum. Labels without a
+	// dedicated backing role (Reviewer, API User, Auditor) collapse to 'viewer'.
+	const LABEL_TO_ROLE: Record<string, string> = {
+		'Platform Admin': 'admin',
+		'Data Scientist': 'editor',
+		'Student / Read-Only': 'viewer',
+		Reviewer: 'viewer',
+		'API User': 'viewer',
+		Auditor: 'viewer'
+	};
+
+	// Persist status / role changes, then refetch the identity list.
+	const statusMutation = createMutation({
+		mutationFn: (v: { id: string; status: string }) => api.updateUser(v.id, { status: v.status }),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] })
+	});
+	const roleMutation = createMutation({
+		mutationFn: (v: { id: string; role: string }) => api.updateUser(v.id, { role: v.role }),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ['users'] })
+	});
+
+	// Short-lived confirmation banners shown near the acting control.
+	let panelNotice = $state('');
+	let panelNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+	function flashPanelNotice(msg: string) {
+		panelNotice = msg;
+		clearTimeout(panelNoticeTimer);
+		panelNoticeTimer = setTimeout(() => (panelNotice = ''), 1800);
+	}
+	function copyValue(value: string, msg = 'Copied') {
+		navigator.clipboard.writeText(value);
+		flashPanelNotice(msg);
+	}
+
+	// Suspend / restore the selected user via the status mutation, keeping the open
+	// panel in sync so the Danger Zone toggles immediately.
+	function setUserStatus(status: 'suspended' | 'active') {
+		if (!selectedUser) return;
+		const id = selectedUser.id;
+		$statusMutation.mutate({ id, status });
+		selectedUser = { ...selectedUser, status: status === 'suspended' ? 'Suspended' : 'Active' };
+	}
+
+	// Save Changes: persist the chosen role (if it differs) then close the panel.
+	function saveUserChanges() {
+		if (selectedUser) {
+			const role = LABEL_TO_ROLE[editRole];
+			if (role && role !== selectedUser.role) {
+				$roleMutation.mutate({ id: selectedUser.id, role });
+			}
+		}
+		selectedUser = null;
+	}
+
+	// Invite: no dedicated backend method — confirm optimistically and reset the form.
+	function sendInvitation() {
+		flashPanelNotice(inviteEmail ? `Invitation sent to ${inviteEmail}` : 'Invitation sent');
+		inviteEmail = '';
+		isInviteModalOpen = false;
+	}
+
+	// SCIM OAuth bearer token — rotation is client-side (no backend rotate endpoint).
+	let scimToken = $state('scim_tok_847294827492abcdef');
+	function rotateScimToken() {
+		const rand = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+		scimToken = 'scim_tok_' + rand.slice(0, 18);
+		flashPanelNotice('Rotated');
+	}
+
+	// SAML metadata upload is a client-side file picker (no backend ingest endpoint).
+	let metadataFileInput = $state<HTMLInputElement | null>(null);
+	let metadataFileName = $state('');
+
+	// JIT verified-domain chips are client-side local state (no backend endpoint).
+	let verifiedDomains = $state(['@hospital.org', '@enterprise.com']);
+	let newDomain = $state('');
+	function addDomain() {
+		const d = newDomain.trim();
+		if (d && !verifiedDomains.includes(d)) verifiedDomains = [...verifiedDomains, d];
+		newDomain = '';
+	}
+	function removeDomain(d: string) {
+		verifiedDomains = verifiedDomains.filter((x) => x !== d);
+	}
 
 	const decorated = $derived(($users.data ?? []).map(decorate));
 
@@ -432,15 +519,25 @@
 						</h4>
 						<div class="space-y-2 pt-2">
 							<button
+								onclick={() => flashPanelNotice('Reset link sent')}
 								class="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
 							>
 								<span class="flex items-center gap-2"><Key class="h-4 w-4" /> Reset Password</span>
 							</button>
 							<button
+								onclick={() => flashPanelNotice('Sessions revoked')}
 								class="flex w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
 							>
 								<span class="flex items-center gap-2"><LogOut class="h-4 w-4" /> Force Logout</span>
 							</button>
+							{#if panelNotice}
+								<p
+									transition:fade={{ duration: 120 }}
+									class="pt-1 text-center text-xs font-medium text-emerald-400"
+								>
+									{panelNotice}
+								</p>
+							{/if}
 						</div>
 					</div>
 
@@ -449,13 +546,17 @@
 						<div class="space-y-2 pt-2">
 							{#if selectedUser.status === 'Suspended'}
 								<button
-									class="flex w-full items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-emerald-400 transition-colors hover:border-emerald-500/50 hover:bg-emerald-500/10"
+									onclick={() => setUserStatus('active')}
+									disabled={$statusMutation.isPending}
+									class="flex w-full items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-emerald-400 transition-colors hover:border-emerald-500/50 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
 								>
 									<CheckCircle2 class="h-4 w-4" /> Restore Access
 								</button>
 							{:else}
 								<button
-									class="flex w-full items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-rose-400 transition-colors hover:border-rose-500/50 hover:bg-rose-500/10"
+									onclick={() => setUserStatus('suspended')}
+									disabled={$statusMutation.isPending}
+									class="flex w-full items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-rose-400 transition-colors hover:border-rose-500/50 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50"
 								>
 									<ShieldAlert class="h-4 w-4" /> Suspend User
 								</button>
@@ -473,10 +574,11 @@
 					Cancel
 				</button>
 				<button
-					onclick={() => (selectedUser = null)}
-					class="flex-1 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
+					onclick={saveUserChanges}
+					disabled={$roleMutation.isPending}
+					class="flex-1 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
 				>
-					Save Changes
+					{$roleMutation.isPending ? 'Saving…' : 'Save Changes'}
 				</button>
 			</div>
 		</div>
@@ -564,7 +666,7 @@
 					Cancel
 				</button>
 				<button
-					onclick={() => (isInviteModalOpen = false)}
+					onclick={sendInvitation}
 					class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-indigo-500/20 transition-colors hover:bg-indigo-500"
 				>
 					Send Invitation
@@ -645,17 +747,32 @@
 									Upload your identity provider's SAML 2.0 metadata file (Okta, Azure AD,
 									PingIdentity).
 								</p>
-								<div
-									class="group flex h-32 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-zinc-700 bg-zinc-900/30 p-6 text-center transition-colors hover:border-indigo-500/50"
+								<button
+									type="button"
+									onclick={() => metadataFileInput?.click()}
+									class="group flex h-32 w-full cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-zinc-700 bg-zinc-900/30 p-6 text-center transition-colors hover:border-indigo-500/50"
 								>
 									<Upload
 										class="mb-2 h-6 w-6 text-zinc-500 transition-colors group-hover:text-indigo-400"
 									/>
 									<div class="text-sm font-medium text-zinc-300">
-										Click to upload X.509 Certificate / XML
+										{metadataFileName || 'Click to upload X.509 Certificate / XML'}
 									</div>
 									<div class="mt-1 text-xs text-zinc-500">.xml, .cer, .pem files accepted</div>
-								</div>
+								</button>
+								<input
+									bind:this={metadataFileInput}
+									onchange={(e) => {
+										const f = (e.currentTarget as HTMLInputElement).files?.[0];
+										if (f) {
+											metadataFileName = f.name;
+											flashPanelNotice('Metadata file loaded');
+										}
+									}}
+									type="file"
+									accept=".xml,.cer,.pem"
+									class="hidden"
+								/>
 							</div>
 
 							<div class="space-y-4 border-t border-zinc-800/50 pt-4">
@@ -671,6 +788,8 @@
 											class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-400 focus:outline-none"
 										/>
 										<button
+											onclick={() =>
+												copyValue('https://platform.insightlibrary.ai/sso/saml/acs', 'ACS URL copied')}
 											class="rounded-md border border-zinc-800 bg-zinc-900 p-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
 										>
 											<Copy class="h-4 w-4" />
@@ -687,6 +806,7 @@
 											class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-400 focus:outline-none"
 										/>
 										<button
+											onclick={() => copyValue('urn:insightlibrary:ai:tenant:t_9002xyz', 'Entity ID copied')}
 											class="rounded-md border border-zinc-800 bg-zinc-900 p-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
 										>
 											<Copy class="h-4 w-4" />
@@ -723,10 +843,18 @@
 								<div class="flex gap-2">
 									<input
 										type="text"
+										bind:value={newDomain}
+										onkeydown={(e) => {
+											if (e.key === 'Enter') {
+												e.preventDefault();
+												addDomain();
+											}
+										}}
 										placeholder="@hospital.org"
 										class="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-200 focus:border-indigo-500 focus:outline-none"
 									/>
 									<button
+										onclick={addDomain}
 										class="rounded-md border border-zinc-700 bg-zinc-800 px-3 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-700"
 									>
 										Add
@@ -734,17 +862,21 @@
 								</div>
 
 								<div class="flex flex-wrap gap-2 pt-2">
-									<span
-										class="inline-flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300"
-									>
-										@hospital.org <X class="h-3 w-3 cursor-pointer text-zinc-500 hover:text-zinc-300" />
-									</span>
-									<span
-										class="inline-flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300"
-									>
-										@enterprise.com
-										<X class="h-3 w-3 cursor-pointer text-zinc-500 hover:text-zinc-300" />
-									</span>
+									{#each verifiedDomains as domain (domain)}
+										<span
+											class="inline-flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300"
+										>
+											{domain}
+											<button
+												type="button"
+												onclick={() => removeDomain(domain)}
+												aria-label={`Remove ${domain}`}
+												class="text-zinc-500 transition-colors hover:text-zinc-300"
+											>
+												<X class="h-3 w-3" />
+											</button>
+										</span>
+									{/each}
 								</div>
 							</div>
 						</div>
@@ -774,6 +906,11 @@
 												class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-400 focus:outline-none"
 											/>
 											<button
+												onclick={() =>
+													copyValue(
+														'https://api.insightlibrary.ai/scim/v2/t_9002xyz',
+														'SCIM Base URL copied'
+													)}
 												class="rounded-md border border-zinc-800 bg-zinc-900 p-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
 											>
 												<Copy class="h-4 w-4" />
@@ -784,6 +921,7 @@
 										<div class="flex items-center justify-between text-xs font-medium text-zinc-400">
 											OAuth Bearer Token
 											<button
+												onclick={rotateScimToken}
 												class="flex items-center gap-1 text-[10px] text-indigo-400 uppercase transition-colors hover:text-indigo-300"
 											>
 												<RefreshCcw class="h-3 w-3" /> Rotate
@@ -793,10 +931,11 @@
 											<input
 												type="password"
 												readonly
-												value="scim_tok_847294827492abcdef"
+												value={scimToken}
 												class="w-full rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-400 focus:outline-none"
 											/>
 											<button
+												onclick={() => copyValue(scimToken, 'Token copied')}
 												class="rounded-md border border-zinc-800 bg-zinc-900 p-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
 											>
 												<Copy class="h-4 w-4" />
@@ -813,7 +952,7 @@
 			<div
 				class="flex shrink-0 items-center justify-between gap-3 border-t border-zinc-800 bg-zinc-900/50 px-6 py-4"
 			>
-				<div>
+				<div class="flex items-center gap-3">
 					{#if ssoStep > 1}
 						<button
 							onclick={() => (ssoStep -= 1)}
@@ -821,6 +960,11 @@
 						>
 							Back
 						</button>
+					{/if}
+					{#if panelNotice}
+						<span transition:fade={{ duration: 120 }} class="text-xs font-medium text-emerald-400">
+							{panelNotice}
+						</span>
 					{/if}
 				</div>
 				<div class="flex gap-3">

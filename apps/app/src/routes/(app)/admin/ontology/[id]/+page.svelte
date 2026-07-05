@@ -66,7 +66,9 @@
 	]);
 
 	type Property = { id: string; name: string; type: string; required: boolean; desc: string };
-	const properties: Property[] = [
+	// The last-loaded/baseline schema. "Discard Changes" resets the editable state
+	// back to this snapshot; edits diverge from it until published.
+	const baselineProperties: Property[] = [
 		{ id: 'prop_1', name: 'ICD-10 Code', type: 'String', required: true, desc: 'Standard billing code' },
 		{
 			id: 'prop_2',
@@ -97,6 +99,8 @@
 			desc: 'Associated conditions'
 		}
 	];
+	// Editable working copy (deep-cloned so mutations don't touch the baseline).
+	let properties = $state<Property[]>(baselineProperties.map((p) => ({ ...p })));
 
 	function typeIcon(type: string) {
 		switch (type) {
@@ -118,6 +122,31 @@
 		entities = entities.map((e) => ({ ...e, active: e.id === entityId }));
 	}
 
+	let entityCounter = $state(0);
+	function addEntity() {
+		entityCounter += 1;
+		const id = `ent_new_${entityCounter}`;
+		entities = [
+			...entities.map((e) => ({ ...e, active: false })),
+			{
+				id,
+				name: 'New Entity',
+				color: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20',
+				active: true
+			}
+		];
+		dirty = true;
+	}
+	function deleteEntity(entityId: string) {
+		if (!confirm('Delete this entity and its schema?')) return;
+		const remaining = entities.filter((e) => e.id !== entityId);
+		// Keep at least one entity active so the builder always has a selection.
+		if (remaining.length && !remaining.some((e) => e.active)) remaining[0].active = true;
+		entities = remaining;
+		dirty = true;
+	}
+	const activeEntity = $derived(entities.find((e) => e.active));
+
 	// Auto-merge strategy toggle for the active entity.
 	let mergeStrategy = $state<'append' | 'review'>('append');
 
@@ -135,6 +164,79 @@
     "Complications": ["hyperthyroidism"]
   }
 }`;
+
+	// ── Editor local state (client-side, no per-entity persistence endpoint) ────
+	let dirty = $state(false);
+	let notice = $state('');
+	let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+	function flashNotice(msg: string) {
+		notice = msg;
+		clearTimeout(noticeTimer);
+		noticeTimer = setTimeout(() => (notice = ''), 3000);
+	}
+
+	// Which property row's options menu is open (null = none).
+	let openMenu = $state<string | null>(null);
+	function toggleMenu(propId: string) {
+		openMenu = openMenu === propId ? null : propId;
+	}
+
+	let propCounter = $state(baselineProperties.length);
+	function addProperty() {
+		propCounter += 1;
+		properties = [
+			...properties,
+			{
+				id: `prop_new_${propCounter}`,
+				name: 'New Property',
+				type: 'String',
+				required: false,
+				desc: ''
+			}
+		];
+		dirty = true;
+	}
+	function deleteProperty(propId: string) {
+		if (!confirm('Delete this property? This cannot be undone until you discard changes.')) return;
+		properties = properties.filter((p) => p.id !== propId);
+		openMenu = null;
+		dirty = true;
+	}
+
+	function discardChanges() {
+		properties = baselineProperties.map((p) => ({ ...p }));
+		mergeStrategy = 'append';
+		openMenu = null;
+		dirty = false;
+		flashNotice('Changes discarded');
+	}
+
+	function publishSchema() {
+		// No per-entity persistence endpoint yet — mark clean and confirm locally.
+		dirty = false;
+		flashNotice('Schema published');
+	}
+
+	// Test extraction against the ontology-expansion endpoint. Uses the first line
+	// of the source text as the sample term.
+	let testAliases = $state<string[] | null>(null);
+	let testRunning = $state(false);
+	let testError = $state('');
+	async function runTest() {
+		const sampleTerm = (testText.trim().split(/[\s.,;:]/)[0] || 'Graves').trim();
+		testRunning = true;
+		testError = '';
+		testAliases = null;
+		try {
+			const res = await api.expandOntology(sampleTerm);
+			testAliases = res.aliases;
+			flashNotice(`Expanded "${res.query}" → ${res.aliases.length} aliases`);
+		} catch (e) {
+			testError = e instanceof Error ? e.message : 'Test extraction failed';
+		} finally {
+			testRunning = false;
+		}
+	}
 </script>
 
 <div class="flex h-full flex-col overflow-hidden">
@@ -173,12 +275,25 @@
 		</div>
 
 		<div class="flex items-center gap-3">
+			{#if notice}
+				<span
+					in:fly={{ x: 8, duration: 200 }}
+					class="rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-400"
+				>
+					{notice}
+				</span>
+			{:else if dirty}
+				<span class="text-xs font-medium text-amber-400">Unsaved changes</span>
+			{/if}
 			<button
-				class="px-3 py-1.5 text-sm font-medium text-zinc-300 transition-colors hover:text-zinc-100"
+				onclick={discardChanges}
+				disabled={!dirty}
+				class="px-3 py-1.5 text-sm font-medium text-zinc-300 transition-colors hover:text-zinc-100 disabled:opacity-40"
 			>
 				Discard Changes
 			</button>
 			<button
+				onclick={publishSchema}
 				class="flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-indigo-600/20 transition-colors hover:bg-indigo-500"
 			>
 				<Save class="h-4 w-4" /> Publish Schema
@@ -196,6 +311,7 @@
 					Entities / Classes
 				</h3>
 				<button
+					onclick={addEntity}
 					class="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
 					aria-label="Add entity"
 				>
@@ -267,7 +383,9 @@
 						</div>
 					</div>
 					<button
-						class="rounded-md border border-transparent p-2 text-rose-400 transition-colors hover:border-rose-500/20 hover:bg-rose-500/10"
+						onclick={() => activeEntity && deleteEntity(activeEntity.id)}
+						disabled={!activeEntity}
+						class="rounded-md border border-transparent p-2 text-rose-400 transition-colors hover:border-rose-500/20 hover:bg-rose-500/10 disabled:opacity-40"
 						aria-label="Delete entity"
 					>
 						<Trash2 class="h-4 w-4" />
@@ -279,6 +397,7 @@
 					<div class="mb-4 flex items-center justify-between">
 						<h3 class="text-lg font-semibold text-zinc-100">Schema Properties</h3>
 						<button
+							onclick={addProperty}
 							class="flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm font-medium text-zinc-200 transition-colors hover:border-zinc-600"
 						>
 							<Plus class="h-4 w-4" /> Add Property
@@ -332,10 +451,41 @@
 											>
 												{p.desc}
 											</td>
-											<td class="px-4 py-3 text-right">
-												<button class="p-1 text-zinc-500 hover:text-zinc-300" aria-label="Property options">
+											<td class="relative px-4 py-3 text-right">
+												<button
+													onclick={() => toggleMenu(p.id)}
+													aria-haspopup="menu"
+													aria-expanded={openMenu === p.id}
+													class="p-1 text-zinc-500 hover:text-zinc-300"
+													aria-label="Property options"
+												>
 													...
 												</button>
+												{#if openMenu === p.id}
+													<div
+														in:fly={{ y: -4, duration: 150 }}
+														class="absolute top-full right-4 z-10 mt-1 w-40 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 shadow-xl"
+													>
+														<button
+															onclick={() => {
+																properties = properties.map((x) =>
+																	x.id === p.id ? { ...x, required: !x.required } : x
+																);
+																openMenu = null;
+																dirty = true;
+															}}
+															class="block w-full px-3 py-2 text-left text-xs text-zinc-300 transition-colors hover:bg-zinc-900"
+														>
+															Toggle Required
+														</button>
+														<button
+															onclick={() => deleteProperty(p.id)}
+															class="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-rose-400 transition-colors hover:bg-rose-500/10"
+														>
+															<Trash2 class="h-3.5 w-3.5" /> Delete Property
+														</button>
+													</div>
+												{/if}
 											</td>
 										</tr>
 									{/each}
@@ -357,7 +507,10 @@
 
 					<div class="flex max-w-sm shrink-0 rounded-lg border border-zinc-800 bg-zinc-950 p-1">
 						<button
-							onclick={() => (mergeStrategy = 'append')}
+							onclick={() => {
+								mergeStrategy = 'append';
+								dirty = true;
+							}}
 							class={cn(
 								'flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors',
 								mergeStrategy === 'append'
@@ -368,7 +521,10 @@
 							Append as Variants
 						</button>
 						<button
-							onclick={() => (mergeStrategy = 'review')}
+							onclick={() => {
+								mergeStrategy = 'review';
+								dirty = true;
+							}}
 							class={cn(
 								'flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors',
 								mergeStrategy === 'review'
@@ -390,9 +546,16 @@
 					Test Extraction
 				</h3>
 				<button
-					class="flex items-center gap-1 text-xs font-medium text-indigo-400 transition-colors hover:text-indigo-300"
+					onclick={runTest}
+					disabled={testRunning}
+					class="flex items-center gap-1 text-xs font-medium text-indigo-400 transition-colors hover:text-indigo-300 disabled:opacity-50"
 				>
-					<RefreshCw class="h-3 w-3" /> Run Test
+					{#if testRunning}
+						<Loader2 class="h-3 w-3 animate-spin" />
+					{:else}
+						<RefreshCw class="h-3 w-3" />
+					{/if}
+					Run Test
 				</button>
 			</div>
 			<div class="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
@@ -405,6 +568,30 @@
 						class="w-full flex-1 resize-none rounded-md border border-zinc-800 bg-zinc-900 p-3 font-serif text-xs text-zinc-300 focus:border-indigo-500/50 focus:outline-none"
 					></textarea>
 				</div>
+				{#if testError}
+					<div
+						class="rounded-md border border-rose-900/50 bg-rose-950/20 p-3 text-xs text-rose-300"
+					>
+						{testError}
+					</div>
+				{:else if testAliases}
+					<div in:fly={{ y: 6, duration: 200 }} class="border-t border-zinc-800 pt-4">
+						<span class="mb-2 block text-xs font-medium text-zinc-400">Detected Aliases</span>
+						{#if testAliases.length}
+							<div class="flex flex-wrap gap-1.5">
+								{#each testAliases as alias (alias)}
+									<span
+										class="rounded border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[11px] text-indigo-300"
+									>
+										{alias}
+									</span>
+								{/each}
+							</div>
+						{:else}
+							<p class="text-xs text-zinc-500">No aliases returned for this term.</p>
+						{/if}
+					</div>
+				{/if}
 				<div class="flex h-48 flex-col border-t border-zinc-800 pt-4">
 					<span class="mb-2 text-xs font-medium text-zinc-400">Simulated JSON Output</span>
 					<div

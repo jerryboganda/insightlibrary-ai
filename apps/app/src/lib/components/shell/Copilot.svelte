@@ -38,6 +38,15 @@
 	let streaming = $state(false);
 	let scroller = $state<HTMLDivElement>();
 
+	// Client-side attach affordance: hidden file input + chosen file name chip.
+	let fileInput = $state<HTMLInputElement>();
+	let attachedName = $state<string | null>(null);
+
+	function onFilePicked(e: Event) {
+		const target = e.currentTarget as HTMLInputElement;
+		attachedName = target.files?.[0]?.name ?? null;
+	}
+
 	let messages = $state<Msg[]>([
 		{ id: 1, sender: 'agent', text: "I have scanned Book D and found 9 new unique claims for Addison's Disease. Ask me anything, grounded in your single source of truth." }
 	]);
@@ -155,6 +164,25 @@
 				>
 					<FileText class="h-3 w-3 text-indigo-400" /> {mode.name}
 				</button>
+				{#if attachedName}
+					<span
+						class="flex items-center gap-1 rounded bg-indigo-500/15 px-2 py-0.5 text-[10px] text-indigo-300"
+					>
+						<FileText class="h-3 w-3" />
+						<span class="max-w-[8rem] truncate">{attachedName}</span>
+						<button
+							type="button"
+							onclick={() => {
+								attachedName = null;
+								if (fileInput) fileInput.value = '';
+							}}
+							class="text-indigo-400 hover:text-indigo-200"
+							aria-label="Remove attachment"
+						>
+							<X class="h-3 w-3" />
+						</button>
+					</span>
+				{/if}
 			</div>
 			<form
 				onsubmit={(e) => {
@@ -163,7 +191,13 @@
 				}}
 				class="relative flex items-center rounded-md border border-zinc-800 bg-zinc-950 focus-within:border-indigo-500/50 focus-within:ring-1 focus-within:ring-indigo-500/50"
 			>
-				<button type="button" class="ml-1 rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" aria-label="Attach">
+				<input
+					bind:this={fileInput}
+					type="file"
+					class="hidden"
+					onchange={onFilePicked}
+				/>
+				<button type="button" onclick={() => fileInput?.click()} class="ml-1 rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" aria-label="Attach">
 					<Plus class="h-4 w-4" />
 				</button>
 				<input

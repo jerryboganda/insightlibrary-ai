@@ -1,26 +1,30 @@
 // process.env (not $env/dynamic/private) so this module loads both inside the
 // SvelteKit server AND in the standalone pg-boss worker (jobs/worker.ts).
+import { sql } from 'drizzle-orm';
 import { chunkText, embedText } from '../ai/embeddings';
 import { extractText } from '../ingestion/extract';
+import { parseDocument, type ParsedDoc } from '../ingestion/parse';
+import { contextualizeChunks } from '../ingestion/contextualize';
 import { downloadObject } from '../storage/s3';
+import { getDb } from '../db/client';
+import * as schema from '../db/schema';
+import { persistProgress } from './processing-store';
+import { extractClaimsForDocument } from '../refinery/extract-claims';
+import { correlateDocument } from '../refinery/correlate';
 
 /**
- * Document ingestion pipeline: extract → chunk → embed → index.
+ * Document ingestion pipeline:
+ *   extract → parse (pages/blocks) → chunk → contextualize → embed → index.
  *
- * With DATABASE_URL, jobs are enqueued to pg-boss (transactional, Postgres-only,
- * no Redis) and executed by the worker (jobs/worker.ts); the embed + index stages
- * do real work — chunking, Gemini embeddings, and pgvector/FTS writes. Without a
- * DB, the pipeline runs inline as a staged simulation so uploads still "process"
- * in dev. Extracting text from a binary PDF requires a native lib (pdfium) + the
- * uploaded file; when `text` is supplied (or a doc is text) the real path runs.
+ * All heavy work runs server-side. Progress is persisted to processing_jobs so
+ * it is visible cross-process (worker → API SSE). Runs with real DB writes when
+ * DATABASE_URL is set; degrades to a staged simulation otherwise.
  */
 
 export interface IngestionJob {
 	documentId: string;
 	documentTitle: string;
-	/** Extracted document text, when the caller already has it. */
 	text?: string;
-	/** S3/MinIO object key — the worker downloads + extracts it (PDF/EPUB/text). */
 	storageKey?: string;
 }
 
@@ -45,76 +49,199 @@ function emit(e: Parameters<ProgressListener>[0]) {
 	for (const fn of listeners) fn(e);
 }
 
-/** Write chunks (+ optional embeddings) to Postgres. No-op without DATABASE_URL. */
-async function indexChunks(
-	documentId: string,
-	chunks: Array<{ content: string; embedding: number[] | null }>
-): Promise<void> {
-	const url = process.env.DATABASE_URL;
-	if (!url || chunks.length === 0) return;
-	const pg = (await import('pg')).default;
-	const { drizzle } = await import('drizzle-orm/node-postgres');
-	const schema = await import('../db/schema');
-	const pool = new pg.Pool({ connectionString: url });
-	try {
-		const db = drizzle(pool, { schema });
-		await db.insert(schema.chunks).values(
-			chunks.map((c, i) => ({
-				id: `${documentId}_chunk_${i}`,
-				documentId,
-				page: null,
-				content: c.content,
-				embedding: c.embedding
-			}))
-		);
-	} finally {
-		await pool.end();
+interface MetaChunk {
+	content: string;
+	page: number | null;
+	blockId: string | null;
+	context: string | null;
+	embedding: number[] | null;
+}
+
+/** Persist parsed pages + blocks (coverage accounting). No-op without a DB. */
+async function persistParsed(documentId: string, parsed: ParsedDoc): Promise<void> {
+	const db = getDb();
+	if (!db) return;
+	if (parsed.pages.length) {
+		await db
+			.insert(schema.docPages)
+			.values(
+				parsed.pages.map((p) => ({
+					id: `${documentId}_pg${p.pageNo}`,
+					documentId,
+					pageNo: p.pageNo,
+					width: p.width ?? null,
+					height: p.height ?? null,
+					status: 'parsed'
+				}))
+			)
+			.onConflictDoNothing();
 	}
+	if (parsed.blocks.length) {
+		await db
+			.insert(schema.docBlocks)
+			.values(
+				parsed.blocks.map((b) => ({
+					id: `${documentId}_p${b.page}_b${b.readingOrder}`,
+					documentId,
+					pageNo: b.page,
+					kind: b.kind,
+					bbox: b.bbox ?? null,
+					readingOrder: b.readingOrder,
+					content: b.content,
+					coverageStatus: 'unaccounted',
+					confidence: b.confidence
+				}))
+			)
+			.onConflictDoNothing();
+	}
+}
+
+/** Coverage accounting: transition blocks unaccounted → chunked → claimed. */
+async function markChunkedCoverage(documentId: string): Promise<void> {
+	const db = getDb();
+	if (!db) return;
+	// A block is 'chunked' once its page has produced chunks; back-link a chunk id.
+	await db.execute(sql`
+		UPDATE doc_blocks b
+		SET coverage_status = 'chunked',
+		    chunk_id = (SELECT c.id FROM chunks c WHERE c.document_id = b.document_id AND c.page = b.page_no ORDER BY c.id LIMIT 1)
+		WHERE b.document_id = ${documentId} AND b.coverage_status = 'unaccounted'
+		  AND EXISTS (SELECT 1 FROM chunks c2 WHERE c2.document_id = b.document_id AND c2.page = b.page_no)
+	`);
+}
+
+async function markClaimedCoverage(documentId: string): Promise<void> {
+	const db = getDb();
+	if (!db) return;
+	// A block is 'claimed' once a claim was extracted from a chunk on its page.
+	await db.execute(sql`
+		UPDATE doc_blocks b
+		SET coverage_status = 'claimed'
+		WHERE b.document_id = ${documentId} AND b.coverage_status <> 'claimed'
+		  AND EXISTS (
+		    SELECT 1 FROM claim_sources cs
+		    JOIN chunks c ON c.id = cs.chunk_id
+		    JOIN claims cl ON cl.id = cs.claim_id
+		    WHERE cl.document_id = b.document_id AND c.page = b.page_no
+		  )
+	`);
+}
+
+/** Write chunks (+ embeddings, context, page, block link) to Postgres. */
+async function indexChunks(documentId: string, chunks: MetaChunk[]): Promise<void> {
+	const db = getDb();
+	if (!db || chunks.length === 0) return;
+	await db.insert(schema.chunks).values(
+		chunks.map((c, i) => ({
+			id: `${documentId}_chunk_${i}`,
+			documentId,
+			page: c.page,
+			content: c.content,
+			context: c.context,
+			blockId: c.blockId,
+			embedding: c.embedding
+		}))
+	);
+}
+
+/** Build page-attributed chunks from parsed blocks (fixes chunks.page = null). */
+function buildMetaChunks(documentId: string, parsed: ParsedDoc): MetaChunk[] {
+	const out: MetaChunk[] = [];
+	for (const p of parsed.pages) {
+		const bs = parsed.blocks.filter((b) => b.page === p.pageNo);
+		if (!bs.length) continue;
+		const pageText = bs.map((b) => b.content).join('\n\n');
+		const firstBlockId = `${documentId}_p${p.pageNo}_b${bs[0].readingOrder}`;
+		for (const piece of chunkText(pageText)) {
+			out.push({ content: piece, page: p.pageNo, blockId: firstBlockId, context: null, embedding: null });
+		}
+	}
+	if (!out.length && parsed.text) {
+		for (const piece of chunkText(parsed.text)) {
+			out.push({ content: piece, page: null, blockId: null, context: null, embedding: null });
+		}
+	}
+	return out;
 }
 
 /** The stage machine — shared by the inline runner and the pg-boss worker. */
 export async function runIngestion(job: IngestionJob): Promise<void> {
-	const step = (stage: string, progress: number, message: string) =>
-		emit({ documentId: job.documentId, documentTitle: job.documentTitle, stage, progress, message });
+	const report = async (stage: string, progress: number, message: string) => {
+		const e = { documentId: job.documentId, documentTitle: job.documentTitle, stage, progress, message };
+		emit(e);
+		await persistProgress(e).catch(() => {});
+	};
 
-	// 1. Extract — real parsing of the uploaded file (PDF/EPUB/text) from S3.
-	step('extract', 12, 'Extracting text');
+	// 1. Extract
+	await report('extract', 10, 'Downloading and extracting text');
+	let bytes: Uint8Array | null = null;
 	let text = job.text?.trim();
 	if (!text && job.storageKey) {
-		const bytes = await downloadObject(job.storageKey);
+		bytes = await downloadObject(job.storageKey);
 		if (bytes) text = (await extractText(bytes, job.storageKey)).trim();
 	}
 	if (!text) {
-		// No text available (binary PDF needs pdfium + the file). Simulate the
-		// remaining stages so the processing UI still advances, then finish.
-		for (const [stage, pct, msg] of [
-			['chunk', 40, 'Splitting into semantic chunks'],
-			['embed', 70, 'Computing embeddings (gemini-embedding-001)'],
-			['index', 92, 'Writing FTS + pgvector index']
-		] as const) {
-			step(stage, pct, msg);
-			await new Promise((r) => setTimeout(r, 300));
-		}
-		step('done', 100, 'Indexed (metadata only — no extractable text)');
+		await report('done', 100, 'Indexed (metadata only — no extractable text)');
 		return;
 	}
 
-	// 2. Chunk
-	step('chunk', 40, 'Splitting into semantic chunks');
-	const chunks = chunkText(text);
+	// 2. Parse — structure-aware pages + blocks with coverage accounting.
+	await report('parse', 28, 'Parsing structure (pages, blocks)');
+	let parsed: ParsedDoc;
+	if (bytes && job.storageKey) {
+		parsed = await parseDocument(bytes, job.storageKey).catch(() => ({
+			pages: [{ pageNo: 1 }],
+			blocks: [],
+			text: text as string
+		}));
+	} else {
+		parsed = { pages: [{ pageNo: 1 }], blocks: [], text };
+	}
+	await persistParsed(job.documentId, parsed).catch(() => {});
 
-	// 3. Embed
-	step('embed', 60, `Computing embeddings for ${chunks.length} chunks`);
-	const embedded = [];
-	for (const content of chunks) {
-		embedded.push({ content, embedding: await embedText(content) });
+	// 3. Chunk (page-attributed)
+	await report('chunk', 45, 'Splitting into semantic chunks');
+	const metaChunks = buildMetaChunks(job.documentId, parsed);
+
+	// 4. Contextualize (Anthropic contextual retrieval — skipped without a provider)
+	await report('contextualize', 58, 'Adding contextual prefixes');
+	const prefixes = await contextualizeChunks(job.documentTitle, metaChunks.map((c) => c.content));
+	metaChunks.forEach((c, i) => (c.context = prefixes[i]));
+
+	// 5. Embed (context + content)
+	await report('embed', 74, `Computing embeddings for ${metaChunks.length} chunks`);
+	for (const c of metaChunks) {
+		const toEmbed = c.context ? `${c.context}\n${c.content}` : c.content;
+		c.embedding = await embedText(toEmbed);
 	}
 
-	// 4. Index (FTS + pgvector)
-	step('index', 88, 'Writing FTS + pgvector index');
-	await indexChunks(job.documentId, embedded);
+	// 6. Index (FTS + pgvector)
+	await report('index', 88, 'Writing FTS + pgvector index');
+	await indexChunks(job.documentId, metaChunks);
+	await markChunkedCoverage(job.documentId).catch(() => {});
 
-	step('done', 100, `Indexed ${chunks.length} chunks`);
+	// 7. Extract claims (refinery) — ontology-linked, topic-routed. Skipped
+	//    silently when no provider is configured.
+	await report('claims', 92, 'Extracting atomic claims');
+	const claimRes = await extractClaimsForDocument(job.documentId).catch((e) => {
+		console.error('[ingest] claim extraction failed:', e instanceof Error ? e.message : e);
+		return { extracted: 0, topics: 0 };
+	});
+	await markClaimedCoverage(job.documentId).catch(() => {});
+
+	// 8. Correlate — dedup, conflict detection, graph triples, topic versions.
+	await report('correlate', 97, 'Deduplicating, detecting conflicts, building graph');
+	const corr = await correlateDocument(job.documentId).catch((e) => {
+		console.error('[ingest] correlation failed:', e instanceof Error ? e.message : e);
+		return { merged: 0, conflicts: 0, triples: 0, versioned: 0 };
+	});
+
+	await report(
+		'done',
+		100,
+		`Indexed ${metaChunks.length} chunks / ${parsed.pages.length} pages · ${claimRes.extracted} claims · ` +
+			`${corr.merged} merged · ${corr.conflicts} conflicts · ${corr.triples} graph edges`
+	);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -126,13 +253,19 @@ async function getBoss() {
 	const { PgBoss } = await import('pg-boss');
 	boss = new PgBoss(process.env.DATABASE_URL);
 	await boss.start();
-	// pg-boss v12 requires queues to exist before send()/work() (idempotent).
 	await boss.createQueue(INGESTION_QUEUE);
 	return boss;
 }
 
 /** Enqueue a document for ingestion (pg-boss when available, inline otherwise). */
 export async function enqueueIngestion(job: IngestionJob): Promise<void> {
+	await persistProgress({
+		documentId: job.documentId,
+		documentTitle: job.documentTitle,
+		stage: 'queued',
+		progress: 0,
+		message: 'Queued'
+	}).catch(() => {});
 	const b = await getBoss();
 	if (b) {
 		await b.send(INGESTION_QUEUE, job);

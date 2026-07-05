@@ -66,6 +66,26 @@
 		};
 	}
 
+	// Build a CSV from array-of-rows and trigger a client-side download.
+	function downloadCsv(name: string, rows: (string | number)[][]) {
+		const csv = rows
+			.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
+			.join('\n');
+		const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = name;
+		a.click();
+		URL.revokeObjectURL(url);
+	}
+
+	// Export the currently filtered audit rows.
+	function exportCsv() {
+		const header = ['Actor', 'Action', 'Target', 'Severity', 'Timestamp'];
+		const body = filtered.map((l) => [l.actor, l.action, l.target, l.severity, l.timestamp]);
+		downloadCsv('audit-logs.csv', [header, ...body]);
+	}
+
 	// Format an ISO timestamp to a compact local time; passes through pre-formatted strings.
 	function fmtTime(ts: string): string {
 		const d = new Date(ts);
@@ -93,7 +113,9 @@
 			</div>
 			<div class="flex items-center gap-3">
 				<button
-					class="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
+					onclick={exportCsv}
+					disabled={filtered.length === 0}
+					class="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
 				>
 					<Download class="h-4 w-4" /> Export CSV
 				</button>

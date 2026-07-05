@@ -1,8 +1,15 @@
 <script lang="ts">
 	import { CreditCard, CheckCircle2, Download, ArrowRight } from '@lucide/svelte';
 	import { fly } from 'svelte/transition';
+	import { createQuery } from '@tanstack/svelte-query';
+	import { api } from '$lib/api';
 
-	// Inline plan / invoice data — no billing endpoint yet (prototype spec).
+	// Live billing status (Stripe). Falls back to the inline plan copy below when
+	// the endpoint reports the integration is not configured.
+	const billing = createQuery({ queryKey: ['billing-status'], queryFn: () => api.getBillingStatus() });
+	const status = $derived($billing.data);
+
+	// Inline plan / invoice data — invoices live in the Stripe portal; this is display copy.
 	const planFeatures = [
 		'100 User Seats (42 active)',
 		'500GB Vector Storage',
@@ -15,6 +22,27 @@
 		{ date: 'Apr 18, 2026', number: 'INV-2026-002', amount: '$999.00', status: 'Paid' },
 		{ date: 'Mar 18, 2026', number: 'INV-2026-003', amount: '$999.00', status: 'Paid' }
 	];
+
+	// Short-lived notice shown near the header when a redirect fails or billing is off.
+	let notice = $state('');
+
+	// Redirect the browser to a Stripe-hosted URL (portal or checkout).
+	async function redirectTo(fn: () => Promise<{ url: string }>) {
+		notice = '';
+		try {
+			const { url } = await fn();
+			window.location.href = url;
+		} catch (err) {
+			if ((err as { status?: number })?.status === 503) {
+				notice = 'Billing not configured';
+			} else {
+				notice = 'Could not open Stripe. Please try again.';
+			}
+		}
+	}
+
+	const openPortal = () => redirectTo(() => api.billingPortal());
+	const openCheckout = () => redirectTo(() => api.billingCheckout());
 </script>
 
 <div class="max-w-5xl p-6 md:p-8">
@@ -24,8 +52,12 @@
 			<p class="mt-1 text-sm text-zinc-400">
 				Manage your enterprise plan, payment methods, and invoices.
 			</p>
+			{#if notice}
+				<p class="mt-2 text-sm text-amber-400" role="status">{notice}</p>
+			{/if}
 		</div>
 		<button
+			onclick={openPortal}
 			class="flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900/50 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
 		>
 			Manage in Stripe <ArrowRight class="h-4 w-4 text-zinc-500" />
@@ -45,10 +77,10 @@
 				<div>
 					<div class="mb-2 flex items-center justify-between">
 						<h2 class="flex items-center gap-2 text-xl font-bold text-zinc-100">
-							Enterprise
+							{status?.plan ?? 'Enterprise'}
 							<span
 								class="rounded-full bg-indigo-500/20 px-2 py-0.5 text-[10px] font-semibold tracking-wider text-indigo-400 uppercase"
-								>Active</span
+								>{status?.status ?? 'Active'}</span
 							>
 						</h2>
 						<span class="text-2xl font-bold text-zinc-100"
@@ -71,7 +103,9 @@
 
 				<div class="mt-8 flex items-center justify-between border-t border-zinc-800 pt-6 text-sm">
 					<span class="text-zinc-500">Renews on June 18, 2026</span>
-					<button class="font-medium text-indigo-400 transition-colors hover:text-indigo-300"
+					<button
+						onclick={openCheckout}
+						class="font-medium text-indigo-400 transition-colors hover:text-indigo-300"
 						>Change Plan</button
 					>
 				</div>
@@ -98,6 +132,7 @@
 			</div>
 
 			<button
+				onclick={openPortal}
 				class="mt-6 w-full rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800"
 			>
 				Update Payment Method
@@ -136,6 +171,7 @@
 							</td>
 							<td class="px-6 py-4 text-right">
 								<button
+									onclick={openPortal}
 									class="inline-flex items-center gap-2 rounded-md p-2 text-zinc-400 transition-colors hover:bg-indigo-500/10 hover:text-indigo-400"
 									aria-label="Download invoice {inv.number}"
 								>

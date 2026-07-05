@@ -14,7 +14,8 @@
 		MessageSquareWarning,
 		Plus,
 		X,
-		Trash2
+		Trash2,
+		RefreshCw
 	} from '@lucide/svelte';
 	import { api } from '$lib/api';
 	import { Skeleton } from '$lib/components/ui';
@@ -32,6 +33,11 @@
 	const addClaim = createMutation({
 		mutationFn: (input: { sectionId: string; content: string; citations: string[] }) =>
 			api.addClaim(id, input),
+		onSuccess: () => qc.invalidateQueries({ queryKey: ['topic', id] })
+	});
+	// Evidence-only recompose + verifier gate → writes a new topic version.
+	const regenerate = createMutation({
+		mutationFn: () => api.regenerateTopic(id),
 		onSuccess: () => qc.invalidateQueries({ queryKey: ['topic', id] })
 	});
 	let modalSection = $state<string | null>(null);
@@ -140,7 +146,8 @@
 							<h2 class="flex items-center gap-2 text-lg font-semibold text-zinc-200"><HeartPulse class="h-5 w-5 text-indigo-400" /> Topic Master File</h2>
 							<div class="flex items-center gap-2">
 								<a href="/study/{topic.id}" class="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800"><BrainCircuit class="h-3.5 w-3.5" /> Study Topic</a>
-								<button class="flex items-center gap-1.5 rounded-md border border-indigo-500/20 bg-indigo-500/10 px-3 py-1.5 text-xs text-indigo-300 transition-colors hover:bg-indigo-500/20"><BadgeCheck class="h-3.5 w-3.5" /> Verify Evidence</button>
+								<button onclick={() => $regenerate.mutate()} disabled={$regenerate.isPending} class="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50"><RefreshCw class={`h-3.5 w-3.5 ${$regenerate.isPending ? 'animate-spin' : ''}`} /> {$regenerate.isPending ? 'Composing…' : 'Regenerate'}</button>
+								<button onclick={() => $regenerate.mutate()} disabled={$regenerate.isPending} class="flex items-center gap-1.5 rounded-md border border-indigo-500/20 bg-indigo-500/10 px-3 py-1.5 text-xs text-indigo-300 transition-colors hover:bg-indigo-500/20 disabled:opacity-50"><BadgeCheck class="h-3.5 w-3.5" /> Verify Evidence</button>
 							</div>
 						</div>
 

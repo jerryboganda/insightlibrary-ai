@@ -1,15 +1,18 @@
-import { env } from '$env/dynamic/private';
 import type { CopilotMode } from '@insightlibrary/schemas';
+import { getRouter, type ChatMessage, type RouteContext } from './providers';
 
 /**
- * Server-side Gemini access. The API key lives ONLY here (never shipped to any
- * client). When GEMINI_API_KEY is absent, a deterministic mock stream is used so
- * the copilot works end-to-end in local dev without a key.
+ * Copilot streaming — now provider-agnostic. Builds the mode system prompt and
+ * streams through the multi-provider router (Gemini / Claude / OpenAI / Kimi /
+ * DeepSeek / MiniMax / OpenAI-compatible). When no provider key is configured a
+ * deterministic mock stream is used so the copilot works with zero external
+ * services (unchanged behavior). Kept at this path so /api/copilot is untouched.
  */
 
 const MODE_SYSTEM_PROMPTS: Record<CopilotMode, string> = {
 	ask: 'Answer helpfully and concisely.',
-	strict_citation: 'Answer ONLY from provided sources. Every claim must carry an inline citation like [bk-A p12]. If unsupported, say so.',
+	strict_citation:
+		'Answer ONLY from provided sources. Every claim must carry an inline citation like [bk-A p12]. If unsupported, say so.',
 	research: 'Explore the question broadly, surface related topics, and suggest follow-up threads.',
 	compare: 'Compare the entities/sources side by side, highlighting agreements and contradictions.',
 	contradiction: 'Focus on detecting and explaining contradictions across sources.',
@@ -27,44 +30,33 @@ export interface CopilotStreamInput {
 	mode: CopilotMode;
 	message: string;
 	context?: string;
+	/** Optional per-request credential (stored key / forwarded OAuth token). */
+	ctx?: RouteContext;
 }
 
-/** Async generator of response text chunks. Real Gemini stream or mock. */
-export async function* streamCopilot(
-	input: CopilotStreamInput
-): AsyncGenerator<string, void, unknown> {
+/** Async generator of response text chunks. Real provider stream or mock. */
+export async function* streamCopilot(input: CopilotStreamInput): AsyncGenerator<string, void, unknown> {
 	const system = MODE_SYSTEM_PROMPTS[input.mode];
+	const router = getRouter();
 
-	if (!env.GEMINI_API_KEY) {
+	if (!router.available('chat', input.ctx)) {
 		yield* mockStream(input, system);
 		return;
 	}
 
-	const { GoogleGenAI } = await import('@google/genai');
-	const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
-	const prompt = input.context
-		? `${system}\n\nSOURCES:\n${input.context}\n\nUSER: ${input.message}`
-		: `${system}\n\nUSER: ${input.message}`;
-
-	const stream = await ai.models.generateContentStream({
-		model: 'gemini-2.5-flash',
-		contents: prompt
-	});
-	for await (const chunk of stream) {
-		const text = chunk.text;
-		if (text) yield text;
-	}
+	const userContent = input.context
+		? `SOURCES:\n${input.context}\n\nUSER: ${input.message}`
+		: input.message;
+	const messages: ChatMessage[] = [{ role: 'user', content: userContent }];
+	yield* router.chatStream(messages, { task: 'chat', system, ctx: input.ctx });
 }
 
-/** Deterministic mock stream — used when no GEMINI_API_KEY is configured. */
-async function* mockStream(
-	input: CopilotStreamInput,
-	system: string
-): AsyncGenerator<string, void, unknown> {
+/** Deterministic mock stream — used when no provider key is configured. */
+async function* mockStream(input: CopilotStreamInput, system: string): AsyncGenerator<string, void, unknown> {
 	const sentences = [
 		`[${input.mode}] `,
 		`I searched the SSOT and knowledge graph for "${input.message}". `,
-		'In a configured deployment this response streams live from Gemini through the backend (the API key never reaches the client). ',
+		'In a configured deployment this response streams live from your selected provider through the backend (the API key never reaches the client). ',
 		input.mode === 'strict_citation'
 			? 'Example grounded answer: hydrocortisone replacement is typically 15–25 mg/day [bk-B p55]. '
 			: 'This is a local mock so the copilot works with zero external services. ',

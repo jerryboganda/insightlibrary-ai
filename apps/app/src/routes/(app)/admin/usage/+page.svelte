@@ -46,6 +46,31 @@
 	);
 
 	const usd = (n: number) => `$${n.toFixed(2)}`;
+
+	// Client-side period filter for the header toggle.
+	let period = $state<'month' | 'all'>('month');
+
+	// Build a CSV from an array of rows and trigger a browser download.
+	function downloadCsv(name: string, rows: (string | number)[][]) {
+		const csv = rows
+			.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(','))
+			.join('\n');
+		const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = name;
+		a.click();
+		URL.revokeObjectURL(url);
+	}
+
+	// Export the current event breakdown (name, count, cost) as a CSV.
+	function exportCsv() {
+		const rows: (string | number)[][] = [
+			['name', 'count', 'cost'],
+			...events.map((e) => [e.name, e.count, e.cost])
+		];
+		downloadCsv(`usage-${period}.csv`, rows);
+	}
 </script>
 
 <main class="w-full overflow-y-auto">
@@ -62,11 +87,17 @@
 			</div>
 			<div class="flex gap-3">
 				<button
-					class="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
+					onclick={() => (period = period === 'month' ? 'all' : 'month')}
+					aria-pressed={period === 'month'}
+					class="flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors {period ===
+					'month'
+						? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-300'
+						: 'border-zinc-800 bg-zinc-900/50 text-zinc-300 hover:bg-zinc-800'}"
 				>
-					<Filter class="h-4 w-4" /> This Month
+					<Filter class="h-4 w-4" /> {period === 'month' ? 'This Month' : 'All Time'}
 				</button>
 				<button
+					onclick={exportCsv}
 					class="flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-indigo-500/20 transition-colors hover:bg-indigo-500"
 				>
 					<Download class="h-4 w-4" /> Export CSV

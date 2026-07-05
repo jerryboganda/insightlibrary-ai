@@ -1,0 +1,5 @@
+{"id":"addison-crisis-mgmt","query":"management of adrenal crisis in Addison disease","expect":"hydrocortisone"}
+{"id":"addison-electrolytes","query":"electrolyte abnormalities in Addison disease","expect":"sodium"}
+{"id":"addison-diagnosis","query":"how is Addison disease diagnosed","expect":"ACTH"}
+{"id":"addison-skin","query":"skin findings in primary adrenal insufficiency","expect":"pigmentation"}
+{"id":"addison-replacement","query":"steroid replacement therapy in adrenal insufficiency","expect":"fludrocortisone"}

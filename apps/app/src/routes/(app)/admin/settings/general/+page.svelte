@@ -12,6 +12,23 @@
 	let showSaved = $state(false);
 	let isDeleting = $state(false);
 
+	// Logo upload is client-side only for now (no asset endpoint yet). Selecting a
+	// file reads it as a data URL for immediate preview; persistence is TBD.
+	let logoInput = $state<HTMLInputElement | null>(null);
+	let logoPreview = $state<string | null>(null);
+
+	function pickLogo() {
+		logoInput?.click();
+	}
+
+	function onLogoChange(e: Event) {
+		const file = (e.currentTarget as HTMLInputElement).files?.[0];
+		if (!file) return;
+		const reader = new FileReader();
+		reader.onload = () => (logoPreview = typeof reader.result === 'string' ? reader.result : null);
+		reader.readAsDataURL(file);
+	}
+
 	function handleSave() {
 		isSaving = true;
 		setTimeout(() => {
@@ -57,11 +74,24 @@
 					<span class="text-sm font-medium text-zinc-300">Workspace Logo</span>
 					<div class="flex items-center gap-6">
 						<div
-							class="flex h-16 w-16 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-xl font-bold text-white uppercase shadow-lg shadow-indigo-500/20"
+							class="flex h-16 w-16 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-xl font-bold text-white uppercase shadow-lg shadow-indigo-500/20"
 						>
-							{logoInitial}
+							{#if logoPreview}
+								<img src={logoPreview} alt="Workspace logo preview" class="h-full w-full object-cover" />
+							{:else}
+								{logoInitial}
+							{/if}
 						</div>
+						<input
+							bind:this={logoInput}
+							onchange={onLogoChange}
+							type="file"
+							accept="image/*"
+							class="hidden"
+						/>
 						<button
+							type="button"
+							onclick={pickLogo}
 							class="flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900/50 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
 						>
 							<UploadCloud class="h-4 w-4" /> Change Logo

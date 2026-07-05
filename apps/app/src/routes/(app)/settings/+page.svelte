@@ -12,6 +12,58 @@
 	import { fade, fly } from 'svelte/transition';
 	import type { Component } from 'svelte';
 	import { cn } from '$lib/utils';
+	import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
+	import { api } from '$lib/api';
+
+	const queryClient = useQueryClient();
+
+	// Load persisted preferences to seed the form (best-effort).
+	const prefsQuery = createQuery({
+		queryKey: ['preferences'],
+		queryFn: () => api.getPreferences()
+	});
+
+	// Persist the current form state via the preferences endpoint. A single
+	// mutation backs both "Save Configuration" and "Save Policy" — each passes
+	// the slice of state it owns.
+	let savedNotice = $state('');
+	let savedTimer: ReturnType<typeof setTimeout> | undefined;
+	const savePrefs = createMutation({
+		mutationFn: (prefs: Record<string, unknown>) => api.savePreferences(prefs),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ['preferences'] });
+			savedNotice = 'Saved';
+			clearTimeout(savedTimer);
+			savedTimer = setTimeout(() => (savedNotice = ''), 3000);
+		}
+	});
+
+	// Seed local form state from persisted preferences when they load.
+	$effect(() => {
+		const p = $prefsQuery.data;
+		if (!p) return;
+		if (typeof p.deltaExtraction === 'boolean') pipeline.deltaExtraction = p.deltaExtraction;
+		if (typeof p.strictCitation === 'boolean') pipeline.strictCitation = p.strictCitation;
+		if (typeof p.graphCommunity === 'boolean') pipeline.graphCommunity = p.graphCommunity;
+		if (typeof p.embeddingModel === 'string') embeddingModel = p.embeddingModel;
+		if (typeof p.extractionModel === 'string') extractionModel = p.extractionModel;
+		if (typeof p.synthesisModel === 'string') synthesisModel = p.synthesisModel;
+	});
+
+	function saveConfiguration() {
+		$savePrefs.mutate({
+			deltaExtraction: pipeline.deltaExtraction,
+			strictCitation: pipeline.strictCitation,
+			graphCommunity: pipeline.graphCommunity,
+			embeddingModel,
+			extractionModel,
+			synthesisModel
+		});
+	}
+
+	function savePolicy() {
+		$savePrefs.mutate({ sourcePriority });
+	}
 
 	// Prototype-only settings (no API endpoint) — all form state is local.
 	let activeTab = $state('General');
@@ -181,11 +233,18 @@
 							</select>
 						</div>
 					</div>
-					<div class="flex justify-end border-t border-zinc-800 bg-zinc-900/30 p-4">
+					<div class="flex items-center justify-end gap-3 border-t border-zinc-800 bg-zinc-900/30 p-4">
+						{#if savedNotice}
+							<span in:fade={{ duration: 150 }} class="text-sm font-medium text-emerald-400">
+								{savedNotice}
+							</span>
+						{/if}
 						<button
-							class="rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-700"
+							onclick={saveConfiguration}
+							disabled={$savePrefs.isPending}
+							class="rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
 						>
-							Save Configuration
+							{$savePrefs.isPending ? 'Saving...' : 'Save Configuration'}
 						</button>
 					</div>
 				</div>
@@ -216,11 +275,18 @@
 							{/each}
 						</div>
 					</div>
-					<div class="flex justify-end border-t border-zinc-800 bg-zinc-900/30 p-4">
+					<div class="flex items-center justify-end gap-3 border-t border-zinc-800 bg-zinc-900/30 p-4">
+						{#if savedNotice}
+							<span in:fade={{ duration: 150 }} class="text-sm font-medium text-emerald-400">
+								{savedNotice}
+							</span>
+						{/if}
 						<button
-							class="rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-700"
+							onclick={savePolicy}
+							disabled={$savePrefs.isPending}
+							class="rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
 						>
-							Save Policy
+							{$savePrefs.isPending ? 'Saving...' : 'Save Policy'}
 						</button>
 					</div>
 				</div>

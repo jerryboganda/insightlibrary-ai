@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { createQuery, useQueryClient } from '@tanstack/svelte-query';
+	import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
 	import { fade, fly } from 'svelte/transition';
 	import {
 		Server,
@@ -29,6 +29,29 @@
 		queryFn: () => api.listProcessing()
 	});
 
+	// Cancel / retry a job, then refetch the queue so status settles.
+	const cancelMutation = createMutation({
+		mutationFn: (id: string) => api.cancelJob(id),
+		onSuccess: () => qc.invalidateQueries({ queryKey: ['processing'] })
+	});
+	const retryMutation = createMutation({
+		mutationFn: (id: string) => api.retryJob(id),
+		onSuccess: () => qc.invalidateQueries({ queryKey: ['processing'] })
+	});
+
+	// Short-lived confirmation shown near the copy controls.
+	let copyNotice = $state('');
+	let copyNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+	function flashCopyNotice(msg: string) {
+		copyNotice = msg;
+		clearTimeout(copyNoticeTimer);
+		copyNoticeTimer = setTimeout(() => (copyNotice = ''), 1800);
+	}
+	function copyToClipboard(value: string, msg = 'Copied') {
+		navigator.clipboard.writeText(value);
+		flashCopyNotice(msg);
+	}
+
 	// The live stream may report progress/stage ahead of the last refetch. Overlay those
 	// per-job so the table reflects the freshest state without refetching everything.
 	let liveOverrides = $state<Record<string, { stage: ProcessingStage; progress: number; message?: string }>>({});
@@ -43,14 +66,32 @@
 	});
 
 	// ── Stage → display metadata ────────────────────────────────────────────────
-	// The pipeline runs: queued → extract → chunk → embed → index → done (or failed).
-	const STAGE_ORDER: ProcessingStage[] = ['queued', 'extract', 'chunk', 'embed', 'index', 'done'];
+	// The refinery pipeline runs: queued → extract → parse → chunk → contextualize →
+	// embed → index → claims → correlate → done (or failed).
+	const STAGE_ORDER: ProcessingStage[] = [
+		'queued',
+		'extract',
+		'parse',
+		'chunk',
+		'contextualize',
+		'embed',
+		'index',
+		'claims',
+		'correlate',
+		'done'
+	];
 	const STAGE_LABEL: Record<ProcessingStage, string> = {
 		queued: 'Queued',
-		extract: 'OCR & Layout Detection',
+		extract: 'Extract & Download',
+		parse: 'Structure Parsing (pages/blocks)',
 		chunk: 'Chunking & Formatting',
+		contextualize: 'Contextual Prefixing',
 		embed: 'Vector Embedding',
 		index: 'Graph & Vector Indexing',
+		claims: 'Claim Extraction',
+		correlate: 'Dedup · Conflict · Graph',
+		graph: 'Graph Building',
+		refine: 'Refinement',
 		done: 'Completed',
 		failed: 'Failed Validation'
 	};
@@ -388,9 +429,18 @@
 				<div>
 					<h3 class="mb-2 text-xs font-semibold tracking-wider text-zinc-500 uppercase">Metadata</h3>
 					<div class="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
-						<div class="flex justify-between text-sm">
+						<div class="flex items-center justify-between text-sm">
 							<span class="text-zinc-500">Job ID</span>
-							<span class="font-mono text-xs text-zinc-200">{selectedJob.id}</span>
+							<span class="flex items-center gap-1.5">
+								<span class="font-mono text-xs text-zinc-200">{selectedJob.id}</span>
+								<button
+									onclick={() => copyToClipboard(selectedJob.id, 'Job ID copied')}
+									class="rounded p-0.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
+									aria-label="Copy job ID"
+								>
+									<Copy class="h-3 w-3" />
+								</button>
+							</span>
 						</div>
 						<div class="flex justify-between text-sm">
 							<span class="text-zinc-500">File</span>
@@ -467,6 +517,7 @@
 					<div class="mb-2 flex items-center justify-between">
 						<h3 class="text-xs font-semibold tracking-wider text-zinc-500 uppercase">Recent Logs</h3>
 						<button
+							onclick={() => copyToClipboard(logsFor(selectedJob).join('\n'), 'Logs copied')}
 							class="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
 							aria-label="Copy logs"
 						>
@@ -486,20 +537,36 @@
 
 			<!-- Actions -->
 			{#if status === 'processing' || status === 'failed'}
-				<div class="flex gap-2 border-t border-zinc-800 bg-zinc-900/50 p-4">
-					{#if status === 'processing'}
-						<button
-							class="flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-medium text-rose-400 transition-colors hover:border-rose-500/50 hover:bg-rose-500/10"
+				<div class="border-t border-zinc-800 bg-zinc-900/50 p-4">
+					{#if copyNotice}
+						<div
+							transition:fade={{ duration: 120 }}
+							class="mb-2 text-center text-[11px] font-medium text-emerald-400"
 						>
-							<Square class="h-4 w-4" fill="currentColor" /> Cancel Job
-						</button>
-					{:else}
-						<button
-							class="flex flex-1 items-center justify-center gap-2 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
-						>
-							<Play class="h-4 w-4" fill="currentColor" /> Retry Job
-						</button>
+							{copyNotice}
+						</div>
 					{/if}
+					<div class="flex gap-2">
+						{#if status === 'processing'}
+							<button
+								onclick={() => $cancelMutation.mutate(selectedJob.id)}
+								disabled={$cancelMutation.isPending}
+								class="flex flex-1 items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-medium text-rose-400 transition-colors hover:border-rose-500/50 hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+							>
+								<Square class="h-4 w-4" fill="currentColor" />
+								{$cancelMutation.isPending ? 'Cancelling…' : 'Cancel Job'}
+							</button>
+						{:else}
+							<button
+								onclick={() => $retryMutation.mutate(selectedJob.id)}
+								disabled={$retryMutation.isPending}
+								class="flex flex-1 items-center justify-center gap-2 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+							>
+								<Play class="h-4 w-4" fill="currentColor" />
+								{$retryMutation.isPending ? 'Retrying…' : 'Retry Job'}
+							</button>
+						{/if}
+					</div>
 				</div>
 			{/if}
 		</aside>

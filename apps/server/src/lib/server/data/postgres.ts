@@ -1,4 +1,4 @@
-import { and, eq, ilike, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, sql } from 'drizzle-orm';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import type {
@@ -26,6 +26,8 @@ import type { Repository } from './repository';
 import * as schema from '../db/schema';
 import { seedDelta, seedEvaluation } from './seed';
 import { embedText } from '../ai/embeddings';
+import { rerankResults } from '../ai/rerank';
+import { expandQuery } from '../ai/expansion';
 import { computeCoverage } from './coverage';
 
 /**
@@ -48,7 +50,7 @@ export class PostgresRepository implements Repository {
 		this.db = drizzle(pool, { schema });
 	}
 
-	/** Idempotently create the FTS tsvector column + GIN index (once per process). */
+	/** Idempotently create the FTS tsvector column + GIN indexes (once per process). */
 	private async ensureFts(): Promise<void> {
 		if (this.ftsReady) return;
 		await this.db.execute(
@@ -57,6 +59,14 @@ export class PostgresRepository implements Repository {
 		);
 		await this.db.execute(
 			sql`CREATE INDEX IF NOT EXISTS chunks_content_fts_idx ON chunks USING gin(content_fts)`
+		);
+		// Context-weighted FTS: the contextual-retrieval prefix (chunks.context) is
+		// weighted 'A' above the body 'B'. An expression index (additive, no rewrite
+		// of the generated column) keeps this safe on the live table.
+		await this.db.execute(
+			sql`CREATE INDEX IF NOT EXISTS chunks_weighted_fts_idx ON chunks USING gin (
+			    (setweight(to_tsvector('english', coalesce(context, '')), 'A') ||
+			     setweight(to_tsvector('english', content), 'B')))`
 		);
 		this.ftsReady = true;
 	}
@@ -203,11 +213,47 @@ export class PostgresRepository implements Repository {
 			citations: input.citations
 		};
 		section.claims.push(claim);
+		// JSONB remains the authoritative SSOT the UI reads.
 		await this.db
 			.update(schema.topics)
 			.set({ sections, updatedAt: new Date() })
 			.where(eq(schema.topics.id, topicId));
+
+		// Dual-write into the normalized claims tables (best-effort; never blocks
+		// the primary JSONB write the app depends on).
+		await this.writeNormalizedClaim(topicId, input.sectionId, claim).catch((e) => {
+			console.error('[addClaim] normalized dual-write failed:', e instanceof Error ? e.message : e);
+		});
 		return claim;
+	}
+
+	/** Insert one JSONB claim as a first-class claims row + its claim_sources. */
+	private async writeNormalizedClaim(topicId: string, sectionId: string, claim: Claim): Promise<void> {
+		const claimRowId = `nc_${topicId}_${sectionId}_${claim.id}`;
+		const embedding = await embedText(claim.content).catch(() => null);
+		await this.db
+			.insert(schema.claims)
+			.values({
+				id: claimRowId,
+				orgId: this.orgId,
+				topicId,
+				sectionId,
+				jsonbClaimId: claim.id,
+				claimType: 'fact',
+				claimText: claim.content,
+				normalizedMeaning: embedding,
+				status: 'active'
+			})
+			.onConflictDoNothing();
+		// citations are interleaved [sourceRef, locator, sourceRef, locator, ...]
+		const rows: (typeof schema.claimSources.$inferInsert)[] = [];
+		for (let i = 0; i < claim.citations.length; i += 2) {
+			const sourceRef = claim.citations[i];
+			const locator = claim.citations[i + 1] ?? null;
+			if (!sourceRef) continue;
+			rows.push({ id: `cs_${claimRowId}_${i}`, claimId: claimRowId, sourceRef, locator, stance: 'supports' });
+		}
+		if (rows.length) await this.db.insert(schema.claimSources).values(rows).onConflictDoNothing();
 	}
 
 	/**
@@ -236,9 +282,13 @@ export class PostgresRepository implements Repository {
 			rank: number;
 		}>(sql`
 			SELECT c.id, c.document_id AS "documentId", c.content, d.title, d.folder_id AS "folderId",
-			       row_number() OVER (ORDER BY ts_rank(c.content_fts, plainto_tsquery('english', ${q})) DESC) AS rank
+			       row_number() OVER (ORDER BY ts_rank(
+			         setweight(to_tsvector('english', coalesce(c.context, '')), 'A') ||
+			         setweight(to_tsvector('english', c.content), 'B'),
+			         plainto_tsquery('english', ${q})) DESC) AS rank
 			FROM chunks c JOIN documents d ON d.id = c.document_id
-			WHERE c.content_fts @@ plainto_tsquery('english', ${q})
+			WHERE (setweight(to_tsvector('english', coalesce(c.context, '')), 'A') ||
+			       setweight(to_tsvector('english', c.content), 'B')) @@ plainto_tsquery('english', ${q})
 			LIMIT 30
 		`);
 		for (const r of fts.rows) {
@@ -286,17 +336,30 @@ export class PostgresRepository implements Repository {
 			}
 		}
 
-		const results: SearchResult[] = [...fused.entries()]
-			.sort((a, b) => b[1].score - a[1].score)
-			.slice(0, 20)
-			.map(([id, v]) => ({
-				kind: 'chunk' as const,
-				id,
-				title: v.title,
-				snippet: v.content.slice(0, 240),
-				href: `/folders/${v.folderId}/${v.documentId}`,
-				score: v.score
-			}));
+		// Optional rerank hop over the top fused candidates (config: RERANK; off by
+		// default → identical behavior). Blends the rerank score onto the RRF score.
+		let entries = [...fused.entries()].sort((a, b) => b[1].score - a[1].score);
+		const topN = entries.slice(0, 30);
+		const reranked = await rerankResults(q, topN.map(([id, v]) => ({ id, text: v.content }))).catch(
+			() => new Map<string, number>()
+		);
+		if (reranked.size) {
+			for (const [id, v] of topN) {
+				const rs = reranked.get(id);
+				if (rs !== undefined) v.score += rs;
+			}
+			topN.sort((a, b) => b[1].score - a[1].score);
+			entries = [...topN, ...entries.slice(30)];
+		}
+
+		const results: SearchResult[] = entries.slice(0, 20).map(([id, v]) => ({
+			kind: 'chunk' as const,
+			id,
+			title: v.title,
+			snippet: v.content.slice(0, 240),
+			href: `/folders/${v.folderId}/${v.documentId}`,
+			score: v.score
+		}));
 
 		// Entity matches (topics/folders) surfaced alongside chunk hits.
 		const like = `%${q}%`;
@@ -304,7 +367,9 @@ export class PostgresRepository implements Repository {
 			.select()
 			.from(schema.topics)
 			.where(and(eq(schema.topics.orgId, this.orgId), ilike(schema.topics.name, like)));
+		const seenTopics = new Set<string>();
 		for (const t of topicMatches) {
+			seenTopics.add(t.id);
 			results.unshift({
 				kind: 'topic',
 				id: t.id,
@@ -315,6 +380,32 @@ export class PostgresRepository implements Repository {
 			});
 		}
 
+		// Ontology-aware recall audit: for entity-like queries, also surface topics
+		// matching the query's ontology aliases (e.g. "Addison" → "primary adrenal
+		// insufficiency"). Guarded to short queries to bound cost.
+		if (q.split(/\s+/).length <= 5) {
+			const aliases = await expandQuery(q).catch(() => [] as string[]);
+			for (const alias of aliases) {
+				if (alias.toLowerCase() === q.toLowerCase()) continue;
+				const m = await this.db
+					.select()
+					.from(schema.topics)
+					.where(and(eq(schema.topics.orgId, this.orgId), ilike(schema.topics.name, `%${alias}%`)));
+				for (const tt of m) {
+					if (seenTopics.has(tt.id)) continue;
+					seenTopics.add(tt.id);
+					results.unshift({
+						kind: 'topic',
+						id: tt.id,
+						title: tt.name,
+						snippet: `Matched via alias "${alias}"`,
+						href: `/topics/${tt.id}`,
+						score: 0.95
+					});
+				}
+			}
+		}
+
 		return { results, mode };
 	}
 
@@ -322,7 +413,21 @@ export class PostgresRepository implements Repository {
 		const rows = topicId
 			? await this.db.select().from(schema.flashcards).where(eq(schema.flashcards.topicId, topicId))
 			: await this.db.select().from(schema.flashcards);
-		return rows.map((r) => ({ id: r.id, topicId: r.topicId, topic: r.topic, front: r.front, back: r.back }));
+		return rows.map((r) => ({
+			id: r.id,
+			topicId: r.topicId,
+			topic: r.topic,
+			front: r.front,
+			back: r.back,
+			sourceClaimId: r.sourceClaimId ?? null,
+			dueAt: r.dueAt?.toISOString() ?? null,
+			intervalDays: r.intervalDays,
+			easeFactor: r.easeFactor,
+			repetitions: r.repetitions,
+			lapses: r.lapses,
+			lastReviewedAt: r.lastReviewedAt?.toISOString() ?? null,
+			state: r.state as Flashcard['state']
+		}));
 	}
 
 	async getGraph(): Promise<Graph> {
@@ -384,7 +489,20 @@ export class PostgresRepository implements Repository {
 		};
 	}
 	async getEvaluation(): Promise<EvaluationMetrics> {
-		return seedEvaluation;
+		const [r] = await this.db
+			.select()
+			.from(schema.evalRuns)
+			.where(eq(schema.evalRuns.orgId, this.orgId))
+			.orderBy(desc(schema.evalRuns.createdAt))
+			.limit(1);
+		if (!r) return seedEvaluation;
+		return {
+			faithfulness: r.faithfulness,
+			citationAccuracy: r.citationAccuracy,
+			hallucinationRate: r.hallucinationRate,
+			noveltyPrecision: r.noveltyPrecision,
+			recentTests: r.recentTests as EvaluationMetrics['recentTests']
+		};
 	}
 	async listProcessing(): Promise<ProcessingJob[]> {
 		const rows = await this.db.select().from(schema.processingJobs);

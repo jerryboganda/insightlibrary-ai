@@ -13,6 +13,7 @@
 		ChevronRight,
 		FlaskConical
 	} from '@lucide/svelte';
+	import { goto } from '$app/navigation';
 	import { Card, PageHeader, Button, Badge } from '$lib/components/ui';
 	import { cn } from '$lib/utils';
 
@@ -107,6 +108,25 @@
 		Concept: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/20',
 		Conflict: 'bg-rose-500/20 text-rose-300 border-rose-500/20'
 	};
+
+	// Pinned-source toggle: membership in this set drives the visual pinned state.
+	// Seed it with the sources that ship pinned so their state reflects reality.
+	let pinned = $state<Set<string>>(new Set(pinnedSources.map((s) => s.title)));
+	function togglePin(title: string) {
+		const next = new Set(pinned);
+		if (next.has(title)) next.delete(title);
+		else next.add(title);
+		pinned = next;
+	}
+
+	// Short-lived notice shown near the Extract Claim action.
+	let notice = $state('');
+	let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+	function flashNotice(msg: string) {
+		notice = msg;
+		clearTimeout(noticeTimer);
+		noticeTimer = setTimeout(() => (notice = ''), 2500);
+	}
 </script>
 
 <div class="mx-auto max-w-6xl space-y-8">
@@ -187,29 +207,67 @@
 			</div>
 			<div class="space-y-3 p-4">
 				{#each pinnedSources as src (src.title)}
-					<div
-						class="group cursor-pointer rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 transition-colors hover:border-indigo-500/30"
+					<button
+						type="button"
+						onclick={() => togglePin(src.title)}
+						aria-pressed={pinned.has(src.title)}
+						class={cn(
+							'group block w-full cursor-pointer rounded-lg border bg-zinc-900/60 p-3 text-left transition-colors',
+							pinned.has(src.title)
+								? 'border-indigo-500/40 bg-indigo-500/5'
+								: 'border-zinc-800 hover:border-indigo-500/30'
+						)}
 					>
 						<div class="flex items-start gap-3">
 							<div
-								class="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-zinc-800 text-zinc-400"
+								class={cn(
+									'flex h-8 w-8 shrink-0 items-center justify-center rounded transition-colors',
+									pinned.has(src.title)
+										? 'bg-indigo-500/20 text-indigo-300'
+										: 'bg-zinc-800 text-zinc-400'
+								)}
 							>
 								<src.icon class="h-4 w-4" />
 							</div>
-							<div class="min-w-0">
-								<h4 class="text-xs font-semibold text-zinc-200 group-hover:text-indigo-300">
-									{src.title}
-								</h4>
+							<div class="min-w-0 flex-1">
+								<div class="flex items-center gap-2">
+									<h4 class="text-xs font-semibold text-zinc-200 group-hover:text-indigo-300">
+										{src.title}
+									</h4>
+									{#if pinned.has(src.title)}
+										<span
+											class="rounded-full bg-indigo-500/20 px-1.5 text-[9px] font-medium text-indigo-300"
+											>Pinned</span
+										>
+									{/if}
+								</div>
 								<p class="mt-1 text-[10px] text-zinc-500">{src.context}</p>
 							</div>
 						</div>
-					</div>
+					</button>
 				{/each}
 				<button
+					onclick={() => {
+						const next = pinnedSources.find((s) => !pinned.has(s.title));
+						if (next) {
+							togglePin(next.title);
+							flashNotice(`Pinned "${next.title}"`);
+						} else {
+							flashNotice('All sources are already pinned');
+						}
+					}}
 					class="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-zinc-800 py-2 text-xs font-medium text-zinc-500 transition-colors hover:border-indigo-500/50 hover:text-indigo-400"
 				>
 					<Plus class="h-3.5 w-3.5" /> Pin Source
 				</button>
+				{#if notice}
+					<p
+						in:fade={{ duration: 150 }}
+						class="rounded-lg border border-indigo-500/20 bg-indigo-500/5 px-3 py-2 text-center text-xs text-indigo-300"
+					>
+						{notice}
+					</p>
+				{/if}
 			</div>
 		</Card>
 
@@ -258,6 +316,7 @@
 					</div>
 				{/each}
 				<button
+					onclick={() => goto('/topics')}
 					class="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-zinc-800 py-2 text-xs font-medium text-zinc-500 transition-colors hover:border-indigo-500/50 hover:text-indigo-400"
 				>
 					<Plus class="h-3.5 w-3.5" /> Extract Claim

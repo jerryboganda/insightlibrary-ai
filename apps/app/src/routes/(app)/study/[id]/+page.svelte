@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { createQuery } from '@tanstack/svelte-query';
+	import { createQuery, createMutation, useQueryClient } from '@tanstack/svelte-query';
 	import { fade, scale } from 'svelte/transition';
 	import {
 		BrainCircuit,
@@ -18,9 +18,10 @@
 	import { api } from '$lib/api';
 	import { Skeleton, Progress } from '$lib/components/ui';
 	import { cn } from '$lib/utils';
-	import type { Flashcard } from '@insightlibrary/schemas';
+	import type { Flashcard, Mcq } from '@insightlibrary/schemas';
 
 	const id = $derived(page.params.id ?? '');
+	const queryClient = useQueryClient();
 
 	// Real API: topic metadata + the generated flashcard deck for this topic.
 	const topicQuery = $derived(
@@ -29,9 +30,40 @@
 	const cardsQuery = $derived(
 		createQuery({ queryKey: ['flashcards', id], queryFn: () => api.listFlashcards(id) })
 	);
+	const mcqsQuery = $derived(createQuery({ queryKey: ['mcqs', id], queryFn: () => api.listMcqs(id) }));
 
 	const topic = $derived($topicQuery.data?.topic);
 	const cards = $derived<Flashcard[]>($cardsQuery.data ?? []);
+	const mcqs = $derived<Mcq[]>($mcqsQuery.data ?? []);
+
+	// Generation + review mutations (all AI runs server-side).
+	const genCards = createMutation({
+		mutationFn: () => api.generateFlashcards(id, 12),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ['flashcards', id] })
+	});
+	const genMcqs = createMutation({
+		mutationFn: () => api.generateMcqs(id, 10),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: ['mcqs', id] })
+	});
+	const reviewCard = createMutation({
+		mutationFn: (v: { cardId: string; grade: 1 | 2 | 3 | 4 }) => api.reviewFlashcard(v.cardId, v.grade)
+	});
+	const genCase = createMutation({ mutationFn: () => api.generateCase(id) });
+	const coverage = $derived($topicQuery.data?.coverage ?? []);
+
+	// MCQ session state.
+	let mcqIndex = $state(0);
+	let mcqChoice = $state<string | null>(null);
+	const currentMcq = $derived(mcqs[mcqIndex]);
+	function chooseMcq(optId: string) {
+		if (mcqChoice) return;
+		mcqChoice = optId;
+	}
+	function nextMcq() {
+		mcqChoice = null;
+		if (mcqIndex < mcqs.length - 1) mcqIndex += 1;
+		else mcqIndex = 0;
+	}
 
 	// Deck stats. Total + mastery come from real data; "due"/"new" splits have no
 	// per-card scheduling field in the API, so we derive a stable split from the
@@ -57,6 +89,8 @@
 		index = 0;
 		flipped = false;
 		reviewed = new Set();
+		mcqIndex = 0;
+		mcqChoice = null;
 	}
 	function next() {
 		flipped = false;
@@ -71,6 +105,8 @@
 			const set = new Set(reviewed);
 			set.add(current.id);
 			reviewed = set;
+			// Persist the review — SM-2 reschedules server-side (Got it=Good, Missed=Again).
+			$reviewCard.mutate({ cardId: current.id, grade: known ? 3 : 1 });
 		}
 		// After grading, advance (or loop back to start on the last card).
 		if (index < cards.length - 1) {
@@ -78,9 +114,6 @@
 		} else {
 			flipped = false;
 		}
-		// `known` is recorded implicitly via the reviewed set; a real backend would
-		// persist the ease/interval per SM-2 here.
-		void known;
 	}
 
 	// Reset the session whenever the deck (topic) changes.
@@ -213,9 +246,16 @@
 									<Layers class="h-6 w-6 text-zinc-600" />
 								</div>
 								<p class="text-sm">
-									No flashcards have been generated for this topic yet. They appear as verified claims
-									accumulate.
+									No flashcards have been generated for this topic yet. Generate a deck from this
+									topic's verified claims.
 								</p>
+								<button
+									onclick={() => $genCards.mutate()}
+									disabled={$genCards.isPending}
+									class="mt-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+								>
+									{$genCards.isPending ? 'Generating…' : 'Generate Flashcards'}
+								</button>
 							</div>
 						</div>
 					{:else}
@@ -325,52 +365,137 @@
 					{/if}
 				</div>
 			{:else if activeTab === 'mcq'}
-				<div
-					in:fade={{ duration: 150 }}
-					class="glass-panel space-y-4 rounded-xl border border-zinc-800 p-8 text-center"
-				>
-					<Target class="mx-auto h-8 w-8 text-indigo-400" />
-					<h3 class="text-lg font-medium text-zinc-200">MCQ Simulator</h3>
-					<p class="mx-auto max-w-sm text-sm text-zinc-400">
-						Generate board-style multiple choice questions targeting SSOT claims.
-					</p>
-					<button
-						class="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
-					>
-						Generate 10 Questions
-					</button>
+				<div in:fade={{ duration: 150 }} class="space-y-6">
+					{#if $mcqsQuery.isLoading}
+						<Skeleton class="h-72 rounded-xl" />
+					{:else if mcqs.length === 0}
+						<div
+							class="glass-panel space-y-4 rounded-xl border border-zinc-800 p-8 text-center"
+						>
+							<Target class="mx-auto h-8 w-8 text-indigo-400" />
+							<h3 class="text-lg font-medium text-zinc-200">MCQ Simulator</h3>
+							<p class="mx-auto max-w-sm text-sm text-zinc-400">
+								Generate board-style single-best-answer questions from this topic's citation-backed
+								claims.
+							</p>
+							<button
+								onclick={() => $genMcqs.mutate()}
+								disabled={$genMcqs.isPending}
+								class="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+							>
+								{$genMcqs.isPending ? 'Generating…' : 'Generate 10 Questions'}
+							</button>
+						</div>
+					{:else if currentMcq}
+						<div class="flex items-center justify-between text-xs text-zinc-500">
+							<span>Question {mcqIndex + 1} of {mcqs.length}</span>
+							<span class="rounded-full border border-zinc-700 px-2 py-0.5 uppercase">{currentMcq.difficulty}</span>
+						</div>
+						<div class="glass-panel space-y-5 rounded-xl border border-zinc-800 p-6">
+							<p class="text-base font-medium text-zinc-100">{currentMcq.stem}</p>
+							<div class="space-y-2">
+								{#each currentMcq.options as opt (opt.id)}
+									{@const isCorrect = opt.id === currentMcq.correctOptionId}
+									{@const isChosen = mcqChoice === opt.id}
+									<button
+										onclick={() => chooseMcq(opt.id)}
+										disabled={!!mcqChoice}
+										class={cn(
+											'flex w-full items-center gap-3 rounded-lg border px-4 py-3 text-left text-sm transition-colors',
+											!mcqChoice && 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-indigo-500/50',
+											mcqChoice && isCorrect && 'border-emerald-500/50 bg-emerald-500/10 text-emerald-200',
+											mcqChoice && isChosen && !isCorrect && 'border-rose-500/50 bg-rose-500/10 text-rose-200',
+											mcqChoice && !isChosen && !isCorrect && 'border-zinc-800 bg-zinc-950 text-zinc-500'
+										)}
+									>
+										<span class="font-mono text-xs text-zinc-500">{opt.id}</span>
+										{opt.text}
+										{#if mcqChoice && isCorrect}<Check class="ml-auto h-4 w-4" />{/if}
+										{#if mcqChoice && isChosen && !isCorrect}<X class="ml-auto h-4 w-4" />{/if}
+									</button>
+								{/each}
+							</div>
+							{#if mcqChoice}
+								<div in:fade class="rounded-lg border border-zinc-800 bg-zinc-950/50 p-4 text-sm text-zinc-400">
+									<span class="font-medium text-zinc-300">Explanation. </span>{currentMcq.explanation}
+								</div>
+								<div class="flex justify-end">
+									<button
+										onclick={nextMcq}
+										class="flex items-center gap-1.5 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+									>
+										Next Question <ChevronRight class="h-4 w-4" />
+									</button>
+								</div>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{:else if activeTab === 'cases'}
-				<div
-					in:fade={{ duration: 150 }}
-					class="glass-panel space-y-4 rounded-xl border border-zinc-800 p-8 text-center"
-				>
-					<Activity class="mx-auto h-8 w-8 text-indigo-400" />
-					<h3 class="text-lg font-medium text-zinc-200">Clinical Case Simulator</h3>
-					<p class="mx-auto max-w-sm text-sm text-zinc-400">
-						Engage in long-form case-based reasoning powered by the SSOT graph.
-					</p>
-					<button
-						class="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
-					>
-						Start Case Scenario
-					</button>
+				<div in:fade={{ duration: 150 }} class="space-y-4">
+					{#if $genCase.data}
+						<div class="glass-panel rounded-xl border border-zinc-800 p-6">
+							<p class="text-sm leading-relaxed whitespace-pre-wrap text-zinc-300">{$genCase.data.case}</p>
+							<button
+								onclick={() => $genCase.mutate()}
+								disabled={$genCase.isPending}
+								class="mt-4 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+							>
+								{$genCase.isPending ? 'Generating…' : 'New Case'}
+							</button>
+						</div>
+					{:else}
+						<div class="glass-panel space-y-4 rounded-xl border border-zinc-800 p-8 text-center">
+							<Activity class="mx-auto h-8 w-8 text-indigo-400" />
+							<h3 class="text-lg font-medium text-zinc-200">Clinical Case Simulator</h3>
+							<p class="mx-auto max-w-sm text-sm text-zinc-400">
+								Generate a case vignette with teaching questions, grounded in this topic's
+								citation-backed claims.
+							</p>
+							<button
+								onclick={() => $genCase.mutate()}
+								disabled={$genCase.isPending}
+								class="mt-4 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
+							>
+								{$genCase.isPending ? 'Generating…' : 'Start Case Scenario'}
+							</button>
+							{#if $genCase.isError}
+								<p class="text-xs text-rose-400">
+									Could not generate a case — add sourced claims to this topic first.
+								</p>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{:else}
-				<div
-					in:fade={{ duration: 150 }}
-					class="glass-panel space-y-4 rounded-xl border border-zinc-800 p-8 text-center"
-				>
-					<Settings class="mx-auto h-8 w-8 text-indigo-400" />
-					<h3 class="text-lg font-medium text-zinc-200">Weakness Analysis</h3>
-					<p class="mx-auto max-w-sm text-sm text-zinc-400">
-						Review your performance across SSOT concepts and plan targeted study.
-					</p>
-					<button
-						class="mt-4 rounded-md bg-zinc-800 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700"
-					>
-						View Detailed Report
-					</button>
+				<div in:fade={{ duration: 150 }} class="space-y-4">
+					{#if coverage.length === 0}
+						<div class="glass-panel space-y-4 rounded-xl border border-zinc-800 p-8 text-center">
+							<Settings class="mx-auto h-8 w-8 text-indigo-400" />
+							<h3 class="text-lg font-medium text-zinc-200">Weakness Analysis</h3>
+							<p class="mx-auto max-w-sm text-sm text-zinc-400">
+								Coverage analysis appears once this topic has sourced claims across systems.
+							</p>
+						</div>
+					{:else}
+						<div class="glass-panel overflow-hidden rounded-xl border border-zinc-800">
+							<div class="border-b border-zinc-800 bg-zinc-900/50 px-6 py-4">
+								<h3 class="text-base font-semibold text-zinc-200">Coverage by aspect</h3>
+								<p class="mt-0.5 text-xs text-zinc-500">Aspects marked weak are your targeted study focus.</p>
+							</div>
+							<div class="divide-y divide-zinc-800/50">
+								{#each coverage as row (row.aspect)}
+									{@const weak = /weak|gap|none/i.test(row.status)}
+									<div class="flex items-center justify-between px-6 py-3">
+										<span class="text-sm text-zinc-300">{row.aspect}</span>
+										<span class={cn('rounded-full px-2.5 py-0.5 text-xs font-medium', weak ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400')}>
+											{row.status}
+										</span>
+									</div>
+								{/each}
+							</div>
+						</div>
+					{/if}
 				</div>
 			{/if}
 		</div>

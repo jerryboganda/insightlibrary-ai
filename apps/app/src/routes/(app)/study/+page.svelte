@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { createQuery } from '@tanstack/svelte-query';
+	import { goto } from '$app/navigation';
 	import { fade } from 'svelte/transition';
 	import {
 		Brain,
@@ -70,6 +71,12 @@
 			cta: 'Resume'
 		}
 	];
+
+	// Learning paths have no dedicated API route; navigate into the study flow for
+	// the path (preferring an explicit action route if one is ever provided).
+	function openPath(path: { id?: string; action?: string }) {
+		goto(path.action ?? (path.id ? `/study/${path.id}` : '/study'));
+	}
 </script>
 
 <div class="flex flex-col">
@@ -151,6 +158,7 @@
 									{/each}
 								</div>
 								<button
+									onclick={() => openPath(path)}
 									class="flex items-center gap-2 rounded-md bg-zinc-100 px-4 py-2 text-sm font-semibold text-zinc-900 transition-colors hover:bg-zinc-200"
 								>
 									<Play class="h-4 w-4 fill-zinc-900" /> {path.cta}
@@ -160,6 +168,7 @@
 									<span class="font-medium text-zinc-300">{path.topicCount}</span> topics
 								</div>
 								<button
+									onclick={() => openPath(path)}
 									class="flex items-center gap-2 rounded-md border border-zinc-700 bg-transparent px-4 py-2 text-sm font-semibold text-zinc-300 transition-colors hover:bg-zinc-800"
 								>
 									{path.cta} <ArrowRight class="h-4 w-4" />

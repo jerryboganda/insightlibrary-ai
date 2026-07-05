@@ -19,6 +19,7 @@
 	import type { Component } from 'svelte';
 	import type { Notification } from '@insightlibrary/schemas';
 	import { api } from '$lib/api';
+	import { goto } from '$app/navigation';
 	import { cn } from '$lib/utils';
 
 	const qc = useQueryClient();
@@ -31,6 +32,39 @@
 		mutationFn: () => api.markAllNotificationsRead(),
 		onSuccess: () => qc.invalidateQueries({ queryKey: ['notifications'] })
 	});
+
+	// Archive a single notification, then refresh the list.
+	const archive = createMutation({
+		mutationFn: (id: string) => api.archiveNotification(id),
+		onSuccess: () => qc.invalidateQueries({ queryKey: ['notifications'] })
+	});
+
+	// Persist notification preferences (no dedicated endpoint — reuse /preferences).
+	const savePrefs = createMutation({
+		mutationFn: (p: Record<string, unknown>) => api.savePreferences(p),
+		onSuccess: () => {
+			qc.invalidateQueries({ queryKey: ['preferences'] });
+			isSettingsOpen = false;
+		}
+	});
+
+	// No per-notification "mark read" endpoint exists; optimistically flip the
+	// read flag in the query cache so the UI reflects the action immediately.
+	function markReadLocal(id: string, read = true) {
+		qc.setQueryData<Notification[]>(['notifications'], (prev) =>
+			(prev ?? []).map((n) => (n.id === id ? { ...n, read } : n))
+		);
+	}
+
+	// The item action button: `action` is a label string. If it names a route
+	// (starts with "/") navigate there; otherwise treat the click as "mark read".
+	function handleAction(n: Notification) {
+		if (n.action && n.action.startsWith('/')) {
+			goto(n.action);
+		} else {
+			markReadLocal(n.id, true);
+		}
+	}
 
 	// The schema carries only { type } — derive presentation (icon + source label) from it,
 	// matching the prototype's per-type styling.
@@ -266,7 +300,12 @@
 										class="relative flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100"
 									>
 										<button
-											class="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
+											onclick={(e) => {
+												e.stopPropagation();
+												$archive.mutate(notification.id);
+											}}
+											disabled={$archive.isPending}
+											class="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-50"
 											title="Archive"
 										>
 											<Archive class="h-4 w-4" />
@@ -293,7 +332,10 @@
 											>
 												<button
 													class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-													onclick={closeMenu}
+													onclick={() => {
+														markReadLocal(notification.id, !notification.read);
+														closeMenu();
+													}}
 												>
 													<CheckCircle2 class="h-4 w-4" />
 													{notification.read ? 'Mark as Unread' : 'Mark as Read'}
@@ -310,7 +352,10 @@
 												<div class="mx-2 my-1 h-px bg-zinc-800"></div>
 												<button
 													class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-rose-400 transition-colors hover:bg-rose-950/30 hover:text-rose-300"
-													onclick={closeMenu}
+													onclick={() => {
+														$archive.mutate(notification.id);
+														closeMenu();
+													}}
 												>
 													<Archive class="h-4 w-4" /> Delete
 												</button>
@@ -324,6 +369,7 @@
 								{#if notification.action}
 									<div class="mt-4">
 										<button
+											onclick={() => handleAction(notification)}
 											class="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:border-indigo-500/50 hover:text-zinc-100"
 										>
 											{notification.action}
@@ -474,10 +520,16 @@
 				Cancel
 			</button>
 			<button
-				onclick={() => (isSettingsOpen = false)}
-				class="flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-indigo-600/20 transition-colors hover:bg-indigo-500"
+				onclick={() => $savePrefs.mutate({ emailDelivery, notifications: { ...prefs } })}
+				disabled={$savePrefs.isPending}
+				class="flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-lg shadow-indigo-600/20 transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
 			>
-				<Save class="h-4 w-4" /> Save Preferences
+				{#if $savePrefs.isPending}
+					<Loader2 class="h-4 w-4 animate-spin" />
+					Saving...
+				{:else}
+					<Save class="h-4 w-4" /> Save Preferences
+				{/if}
 			</button>
 		</div>
 	</div>

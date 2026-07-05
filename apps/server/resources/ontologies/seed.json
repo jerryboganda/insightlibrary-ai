@@ -1,0 +1,105 @@
+{
+	"_note": "Small bundled seed (free, redistributable concepts). Full MeSH/Mondo/HPO/RxNorm are loaded via scripts/ontology/build-*.ts into this same shape. UMLS/SNOMED are user-supplied only, never bundled.",
+	"concepts": [
+		{
+			"id": "mondo:MONDO:0008170",
+			"ontology": "mondo",
+			"code": "MONDO:0008170",
+			"prefLabel": "Addison disease",
+			"kind": "disease",
+			"description": "Primary adrenal insufficiency — the adrenal cortex fails to produce enough cortisol (and often aldosterone).",
+			"synonyms": [
+				"Addison's disease",
+				"primary adrenal insufficiency",
+				"chronic adrenocortical insufficiency",
+				"primary hypoadrenalism",
+				"hypocortisolism",
+				"autoimmune adrenalitis"
+			]
+		},
+		{
+			"id": "mondo:MONDO:0100246",
+			"ontology": "mondo",
+			"code": "MONDO:0100246",
+			"prefLabel": "adrenal crisis",
+			"kind": "disease",
+			"description": "Acute, life-threatening adrenal insufficiency (Addisonian crisis).",
+			"synonyms": ["Addisonian crisis", "acute adrenal insufficiency", "acute adrenocortical insufficiency"]
+		},
+		{
+			"id": "mesh:D000224",
+			"ontology": "mesh",
+			"code": "D000224",
+			"prefLabel": "Addison Disease",
+			"kind": "disease",
+			"synonyms": ["Adrenal Cortical Hypofunction", "Primary Adrenocortical Insufficiency"]
+		},
+		{
+			"id": "rxnorm:5492",
+			"ontology": "rxnorm",
+			"code": "5492",
+			"prefLabel": "hydrocortisone",
+			"kind": "drug",
+			"description": "Glucocorticoid used for replacement therapy in adrenal insufficiency.",
+			"synonyms": ["cortisol", "hydrocortone"]
+		},
+		{
+			"id": "rxnorm:4452",
+			"ontology": "rxnorm",
+			"code": "4452",
+			"prefLabel": "fludrocortisone",
+			"kind": "drug",
+			"description": "Mineralocorticoid used for aldosterone replacement in primary adrenal insufficiency.",
+			"synonyms": ["fludrocortisone acetate", "Florinef"]
+		},
+		{
+			"id": "hp:HP:0002902",
+			"ontology": "hpo",
+			"code": "HP:0002902",
+			"prefLabel": "Hyponatremia",
+			"kind": "phenotype",
+			"synonyms": ["low sodium", "low serum sodium"]
+		},
+		{
+			"id": "hp:HP:0002153",
+			"ontology": "hpo",
+			"code": "HP:0002153",
+			"prefLabel": "Hyperkalemia",
+			"kind": "phenotype",
+			"synonyms": ["high potassium", "elevated serum potassium"]
+		},
+		{
+			"id": "hp:HP:0000859",
+			"ontology": "hpo",
+			"code": "HP:0000859",
+			"prefLabel": "Hyperpigmentation of the skin",
+			"kind": "phenotype",
+			"synonyms": ["skin hyperpigmentation", "bronzing of skin"]
+		},
+		{
+			"id": "mesh:D000309",
+			"ontology": "mesh",
+			"code": "D000309",
+			"prefLabel": "Adrenocorticotropic Hormone",
+			"kind": "concept",
+			"synonyms": ["ACTH", "corticotropin", "ACTH stimulation test"]
+		},
+		{
+			"id": "mesh:D003278",
+			"ontology": "mesh",
+			"code": "D003278",
+			"prefLabel": "Cortisol",
+			"kind": "concept",
+			"synonyms": ["hydrocortisone", "serum cortisol"]
+		}
+	],
+	"edges": [
+		{ "source": "mondo:MONDO:0008170", "target": "mondo:MONDO:0100246", "rel": "complication_of" },
+		{ "source": "mondo:MONDO:0008170", "target": "hp:HP:0002902", "rel": "presents_with" },
+		{ "source": "mondo:MONDO:0008170", "target": "hp:HP:0002153", "rel": "presents_with" },
+		{ "source": "mondo:MONDO:0008170", "target": "hp:HP:0000859", "rel": "presents_with" },
+		{ "source": "mondo:MONDO:0008170", "target": "rxnorm:5492", "rel": "treated_with" },
+		{ "source": "mondo:MONDO:0008170", "target": "rxnorm:4452", "rel": "treated_with" },
+		{ "source": "mondo:MONDO:0008170", "target": "mesh:D000309", "rel": "diagnosed_by" }
+	]
+}

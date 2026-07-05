@@ -1,3 +1,4 @@
+mod oauth;
 mod secrets;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -22,11 +23,16 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     builder
-        // Session-token storage in the OS keyring (bearer auth for the API).
+        // Experimental ChatGPT OAuth loopback capture state.
+        .manage(oauth::OauthState::default())
+        // Session-token storage in the OS keyring (bearer auth for the API) +
+        // the experimental ChatGPT OAuth sign-in commands.
         .invoke_handler(tauri::generate_handler![
             secrets::secrets_get,
             secrets::secrets_set,
-            secrets::secrets_delete
+            secrets::secrets_delete,
+            oauth::oauth_start,
+            oauth::oauth_complete
         ])
         .run(tauri::generate_context!())
         .expect("error while running InsightLibrary AI");

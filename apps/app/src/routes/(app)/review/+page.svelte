@@ -20,6 +20,15 @@
 	// Track which specific item + decision is mutating so we can show per-button spinners.
 	let pending = $state<{ id: string; decision: 'accepted' | 'rejected' } | null>(null);
 
+	// Track which items have their sources panel expanded (client-only toggle).
+	let expandedSources = $state<Set<string>>(new Set());
+	function toggleSources(id: string) {
+		const next = new Set(expandedSources);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		expandedSources = next;
+	}
+
 	const resolve = createMutation({
 		mutationFn: (vars: { id: string; decision: 'accepted' | 'rejected' }) =>
 			api.resolveReview(vars.id, vars.decision),
@@ -187,11 +196,39 @@
 								<p class="text-sm text-zinc-400">{item.notes}</p>
 							</div>
 
+							{#if expandedSources.has(item.id)}
+								<div
+									in:fly={{ y: -6, duration: 200 }}
+									class="mt-4 space-y-2 rounded-lg border border-zinc-800 bg-zinc-950/60 p-3"
+								>
+									<h4 class="text-xs font-semibold tracking-wider text-zinc-500 uppercase">
+										Sources
+									</h4>
+									{#if item.type === 'conflict'}
+										<div class="flex items-center gap-2 text-xs text-zinc-400">
+											<span class="text-zinc-500">Existing SSOT:</span>
+											<span class="rounded bg-indigo-500/10 px-1.5 py-0.5 font-mono text-indigo-300">
+												{item.sourceA}
+											</span>
+										</div>
+									{/if}
+									<div class="flex items-center gap-2 text-xs text-zinc-400">
+										<span class="text-zinc-500">New Extract:</span>
+										<span class="rounded bg-indigo-500/10 px-1.5 py-0.5 font-mono text-indigo-300">
+											{item.sourceB}
+										</span>
+									</div>
+								</div>
+							{/if}
+
 							<div class="mt-6 flex items-center justify-end gap-3">
 								<button
+									onclick={() => toggleSources(item.id)}
+									aria-expanded={expandedSources.has(item.id)}
 									class="mr-auto flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-400 transition-colors hover:text-zinc-200"
 								>
-									<ExternalLink class="h-3.5 w-3.5" /> View Sources
+									<ExternalLink class="h-3.5 w-3.5" />
+									{expandedSources.has(item.id) ? 'Hide Sources' : 'View Sources'}
 								</button>
 								<button
 									onclick={() => $resolve.mutate({ id: item.id, decision: 'rejected' })}

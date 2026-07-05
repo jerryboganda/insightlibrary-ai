@@ -1,4 +1,6 @@
 import type {
+	AiKeyInput,
+	AiProvidersResponse,
 	AuditLog,
 	Claim,
 	CopilotMode,
@@ -10,15 +12,18 @@ import type {
 	Folder,
 	Graph,
 	HealthResponse,
+	Mcq,
 	NewClaim,
 	Notification,
 	Ontology,
 	ProcessingJob,
+	ProviderId,
 	ReviewItem,
 	SearchResponse,
 	SessionResponse,
 	Source,
 	Topic,
+	TopicVersion,
 	UsageMetrics,
 	User
 } from '@insightlibrary/schemas';
@@ -28,6 +33,8 @@ export interface ApiClientOptions {
 	baseUrl: string;
 	/** Bearer token supplier (Tauri: OS keyring). Web relies on cookies instead. */
 	getToken?: () => Promise<string | null>;
+	/** Optional forwarded AI OAuth token (desktop ChatGPT subscription) for copilot. */
+	getAiToken?: () => Promise<string | null>;
 	fetchImpl?: typeof fetch;
 }
 
@@ -112,15 +119,53 @@ export class ApiClient {
 			method: 'POST',
 			body: JSON.stringify(input)
 		});
+	/** Evidence-only recompose + verify → writes a new topic version. */
+	regenerateTopic = (id: string) =>
+		this.request<{ ok: boolean; faithfulness?: number; sections?: number; claims?: number; version?: number | null }>(
+			`/api/topics/${id}/regenerate`,
+			{ method: 'POST' }
+		);
+	listTopicVersions = (id: string) =>
+		this.request<ListEnvelope<TopicVersion>>(`/api/topics/${id}/versions`).then((r) => r.items);
 
-	// Study
+	// Study / exam engine
 	listFlashcards = (topicId?: string) =>
 		this.request<ListEnvelope<Flashcard>>(
 			`/api/flashcards${topicId ? `?topicId=${topicId}` : ''}`
 		).then((r) => r.items);
+	generateFlashcards = (topicId: string, count?: number) =>
+		this.request<{ generated: number }>(`/api/topics/${topicId}/flashcards`, {
+			method: 'POST',
+			body: JSON.stringify({ count })
+		});
+	reviewFlashcard = (id: string, grade: 1 | 2 | 3 | 4) =>
+		this.request<{ ok: boolean; state: string; dueAt: string }>(`/api/flashcards/${id}/review`, {
+			method: 'POST',
+			body: JSON.stringify({ grade })
+		});
+	listMcqs = (topicId?: string) =>
+		this.request<ListEnvelope<Mcq>>(`/api/mcqs${topicId ? `?topicId=${topicId}` : ''}`).then((r) => r.items);
+	generateMcqs = (topicId: string, count?: number) =>
+		this.request<{ generated: number }>('/api/mcqs', {
+			method: 'POST',
+			body: JSON.stringify({ topicId, count })
+		});
+	generateCase = (topicId: string) =>
+		this.request<{ case: string }>(`/api/topics/${topicId}/case`, { method: 'POST' });
 
-	// Graph
+	// Graph + GraphRAG communities
 	getGraph = () => this.request<Graph>('/api/graph');
+	listGraphCommunities = () =>
+		this.request<ListEnvelope<{ id: string; label: string; size: number; nodeIds: string[] }>>(
+			'/api/graph/communities'
+		).then((r) => r.items);
+	getGraphCommunity = (nodeId: string) =>
+		this.request<{
+			label: string;
+			nodes: { id: string; label: string }[];
+			edges: { source: string; target: string; label: string }[];
+			summary?: string;
+		}>(`/api/graph/community/${encodeURIComponent(nodeId)}`);
 
 	// Review
 	listReview = () => this.request<ListEnvelope<ReviewItem>>('/api/review').then((r) => r.items);
@@ -130,9 +175,80 @@ export class ApiClient {
 			body: JSON.stringify({ decision })
 		});
 
+	// Ontology
+	expandOntology = (q: string) =>
+		this.request<{ query: string; aliases: string[] }>(`/api/ontology/expand?q=${encodeURIComponent(q)}`);
+
+	// Multi-provider AI settings
+	getAiProviders = () => this.request<AiProvidersResponse>('/api/ai/providers');
+	saveAiKey = (input: AiKeyInput) =>
+		this.request<{ ok: true }>('/api/ai/keys', { method: 'POST', body: JSON.stringify(input) });
+	deleteAiKey = (provider: ProviderId, scope: 'org' | 'user' = 'org') =>
+		this.request<{ ok: true }>(`/api/ai/keys?provider=${provider}&scope=${scope}`, { method: 'DELETE' });
+
+	// Graph analytics
+	getGraphPageRank = () =>
+		this.request<ListEnvelope<{ id: string; label: string; score: number }>>('/api/graph/pagerank').then((r) => r.items);
+	// Figure / table (visual) retrieval
+	searchFigures = (q: string) =>
+		this.request<ListEnvelope<{ id: string; documentId: string; page: number; kind: string; content: string; title: string }>>(
+			`/api/figures?q=${encodeURIComponent(q)}`
+		).then((r) => r.items);
+
+	// Hosted-tier admin: processing control
+	cancelJob = (id: string) => this.request<{ ok: true }>(`/api/processing/${id}/cancel`, { method: 'POST' });
+	retryJob = (id: string) => this.request<{ ok: true }>(`/api/processing/${id}/retry`, { method: 'POST' });
+	reindex = () => this.request<{ reembedded: number; remaining: boolean }>('/api/admin/reindex', { method: 'POST' });
+
+	// Preferences
+	getPreferences = () => this.request<{ prefs: Record<string, unknown> }>('/api/preferences').then((r) => r.prefs);
+	savePreferences = (prefs: Record<string, unknown>) =>
+		this.request<{ ok: true }>('/api/preferences', { method: 'PATCH', body: JSON.stringify(prefs) });
+
+	// User admin
+	updateUser = (id: string, patch: { role?: string; status?: string }) =>
+		this.request<{ id: string; role: string; status: string }>(`/api/users/${id}`, {
+			method: 'PATCH',
+			body: JSON.stringify(patch)
+		});
+
+	// API keys
+	listApiKeys = () =>
+		this.request<ListEnvelope<{ id: string; name: string; tokenHint: string; createdAt: string; lastUsedAt: string | null }>>(
+			'/api/api-keys'
+		).then((r) => r.items);
+	createApiKey = (name: string) =>
+		this.request<{ id: string; name: string; token: string; tokenHint: string }>('/api/api-keys', {
+			method: 'POST',
+			body: JSON.stringify({ name })
+		});
+	deleteApiKey = (id: string) => this.request<{ ok: true }>(`/api/api-keys/${id}`, { method: 'DELETE' });
+
+	// Webhooks
+	listWebhooks = () =>
+		this.request<ListEnvelope<{ id: string; url: string; event: string; active: boolean }>>('/api/webhooks').then((r) => r.items);
+	createWebhook = (url: string, event?: string) =>
+		this.request<{ id: string; url: string; event: string; active: boolean }>('/api/webhooks', {
+			method: 'POST',
+			body: JSON.stringify({ url, event })
+		});
+	deleteWebhook = (id: string) => this.request<{ ok: true }>(`/api/webhooks/${id}`, { method: 'DELETE' });
+
+	// Notifications
+	archiveNotification = (id: string) => this.request<{ ok: true }>(`/api/notifications/${id}/archive`, { method: 'POST' });
+
+	// Billing (Stripe)
+	getBillingStatus = () =>
+		this.request<{ configured: boolean; plan: string; status: string; currentPeriodEnd: string | null; hasCustomer: boolean }>(
+			'/api/billing/status'
+		);
+	billingCheckout = () => this.request<{ url: string }>('/api/billing/checkout', { method: 'POST' });
+	billingPortal = () => this.request<{ url: string }>('/api/billing/portal', { method: 'POST' });
+
 	// Admin
 	getUsage = () => this.request<UsageMetrics>('/api/usage');
 	getEvaluation = () => this.request<EvaluationMetrics>('/api/evaluation');
+	runEvaluation = () => this.request<EvaluationMetrics>('/api/evaluation/run', { method: 'POST' });
 	listProcessing = () =>
 		this.request<ListEnvelope<ProcessingJob>>('/api/processing').then((r) => r.items);
 	listAudit = () => this.request<ListEnvelope<AuditLog>>('/api/audit').then((r) => r.items);
@@ -151,6 +267,8 @@ export class ApiClient {
 		const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'text/event-stream' });
 		const token = await this.options.getToken?.();
 		if (token) headers.set('Authorization', `Bearer ${token}`);
+		const aiToken = await this.options.getAiToken?.();
+		if (aiToken) headers.set('x-ai-oauth-token', aiToken);
 		return fetchImpl(`${this.options.baseUrl}/api/copilot`, {
 			method: 'POST',
 			credentials: 'include',

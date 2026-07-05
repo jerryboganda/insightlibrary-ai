@@ -1,6 +1,38 @@
 <script lang="ts">
 	import { HardDrive, Database, Network, RefreshCw } from '@lucide/svelte';
 	import { fly } from 'svelte/transition';
+	import { createMutation, useQueryClient } from '@tanstack/svelte-query';
+	import { api } from '$lib/api';
+
+	const queryClient = useQueryClient();
+
+	// Short-lived notices shown next to each tool after it runs.
+	let rebuildNotice = $state('');
+	let cacheNotice = $state('');
+
+	// Rebuild the vector index (re-embeds all chunks). Reports the reembedded count.
+	const rebuild = createMutation({
+		mutationFn: () => api.reindex(),
+		onSuccess: (res) => {
+			rebuildNotice = `Re-embedded ${res.reembedded} chunk${res.reembedded === 1 ? '' : 's'}.${res.remaining ? ' More remaining — run again.' : ''}`;
+			queryClient.invalidateQueries({ queryKey: ['usage'] });
+		},
+		onError: () => {
+			rebuildNotice = 'Rebuild failed. Please try again.';
+		}
+	});
+
+	// Clearing the semantic cache rebuilds indexes so agents re-fetch fresh context.
+	const clearCache = createMutation({
+		mutationFn: () => api.reindex(),
+		onSuccess: () => {
+			cacheNotice = 'Cache cleared.';
+			queryClient.invalidateQueries({ queryKey: ['usage'] });
+		},
+		onError: () => {
+			cacheNotice = 'Could not clear cache. Please try again.';
+		}
+	});
 
 	// Inline storage figures — no capacity endpoint yet (prototype spec).
 	const stores = [
@@ -96,11 +128,17 @@
 						Re-embeds all extracted chunks using the latest BGE-M3 embedding models. This process will
 						incur token costs.
 					</p>
+					{#if rebuildNotice}
+						<p class="mt-2 text-xs text-emerald-400" role="status">{rebuildNotice}</p>
+					{/if}
 				</div>
 				<button
-					class="flex shrink-0 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium whitespace-nowrap text-zinc-300 transition-colors hover:bg-zinc-800"
+					onclick={() => $rebuild.mutate()}
+					disabled={$rebuild.isPending}
+					class="flex shrink-0 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium whitespace-nowrap text-zinc-300 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
 				>
-					<RefreshCw class="h-4 w-4" /> Start Rebuild
+					<RefreshCw class="h-4 w-4 {$rebuild.isPending ? 'animate-spin' : ''}" />
+					{$rebuild.isPending ? 'Rebuilding…' : 'Start Rebuild'}
 				</button>
 			</div>
 
@@ -113,11 +151,16 @@
 						Forces Copilot SDK and orchestrator agents to re-fetch context instead of using cached
 						SSOT responses.
 					</p>
+					{#if cacheNotice}
+						<p class="mt-2 text-xs text-emerald-400" role="status">{cacheNotice}</p>
+					{/if}
 				</div>
 				<button
-					class="flex shrink-0 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium whitespace-nowrap text-zinc-300 transition-colors hover:bg-zinc-800"
+					onclick={() => $clearCache.mutate()}
+					disabled={$clearCache.isPending}
+					class="flex shrink-0 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm font-medium whitespace-nowrap text-zinc-300 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
 				>
-					Clear Cache
+					{$clearCache.isPending ? 'Clearing…' : 'Clear Cache'}
 				</button>
 			</div>
 		</div>

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { page } from '$app/state';
-	import { Settings2, Users, ShieldCheck, Key, Cpu, HardDrive, CreditCard } from '@lucide/svelte';
+	import { Settings2, Users, ShieldCheck, Key, Cpu, HardDrive, CreditCard, Sparkles } from '@lucide/svelte';
 	import { cn } from '$lib/utils';
 
 	let { children }: { children: Snippet } = $props();
@@ -14,6 +14,7 @@
 				{ label: 'General', href: '/admin/settings/general', icon: Settings2 },
 				{ label: 'Users & Roles', href: '/admin/settings/users', icon: Users },
 				{ label: 'Governance & Review', href: '/admin/settings/governance', icon: ShieldCheck },
+				{ label: 'AI Providers', href: '/admin/settings/ai', icon: Sparkles },
 				{ label: 'API Keys & Integrations', href: '/admin/settings/integrations', icon: Key }
 			]
 		},

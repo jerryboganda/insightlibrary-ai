@@ -94,3 +94,46 @@ export const newClaimSchema = z.object({
 	citations: z.array(z.string())
 });
 export type NewClaim = z.infer<typeof newClaimSchema>;
+
+// ── Multi-provider LLM management ───────────────────────────────────────────
+export const providerIdSchema = z.enum([
+	'gemini',
+	'anthropic',
+	'openai',
+	'moonshot',
+	'deepseek',
+	'minimax',
+	'openai-compatible'
+]);
+export type ProviderId = z.infer<typeof providerIdSchema>;
+
+/** One provider's status for the settings UI (never includes the key itself). */
+export const providerInfoSchema = z.object({
+	id: providerIdSchema,
+	label: z.string(),
+	/** A server-side env key is present. */
+	envConfigured: z.boolean(),
+	/** An org/user key is stored in the DB. */
+	keyStored: z.boolean(),
+	hint: z.string(),
+	model: z.string().nullable(),
+	supportsEmbeddings: z.boolean()
+});
+export type ProviderInfo = z.infer<typeof providerInfoSchema>;
+
+export const aiProvidersResponseSchema = z.object({
+	providers: z.array(providerInfoSchema),
+	activeChatProvider: z.string(),
+	encryptionAvailable: z.boolean()
+});
+export type AiProvidersResponse = z.infer<typeof aiProvidersResponseSchema>;
+
+export const aiKeyInputSchema = z.object({
+	provider: providerIdSchema,
+	apiKey: z.string().min(1),
+	baseUrl: z.string().url().optional(),
+	model: z.string().optional(),
+	/** 'org' (shared, admin) or 'user' (personal, web BYO). Defaults to 'org'. */
+	scope: z.enum(['org', 'user']).default('org')
+});
+export type AiKeyInput = z.infer<typeof aiKeyInputSchema>;

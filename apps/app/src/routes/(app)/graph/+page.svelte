@@ -168,6 +168,16 @@
 		return !!selectedId && (e.source === selectedId || e.target === selectedId);
 	}
 
+	// GraphRAG: the community (connected component) + LLM theme summary for the
+	// selected node.
+	const communityQuery = $derived(
+		createQuery({
+			queryKey: ['graph-community', selectedId],
+			queryFn: () => api.getGraphCommunity(selectedId as string),
+			enabled: !!selectedId
+		})
+	);
+
 	function select(id: string) {
 		selectedId = selectedId === id ? null : id;
 	}
@@ -513,6 +523,23 @@
 							{/each}
 						</div>
 					</div>
+
+					<!-- GraphRAG community theme -->
+					{#if $communityQuery.data?.summary}
+						<div>
+							<h4 class="mb-2 text-[10px] font-semibold tracking-wider text-zinc-500 uppercase">
+								Community Theme
+							</h4>
+							<p
+								class="rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3 text-xs leading-relaxed text-zinc-300"
+							>
+								{$communityQuery.data.summary}
+							</p>
+							<p class="mt-1 text-[10px] text-zinc-600">
+								{$communityQuery.data.nodes.length} concepts in this community
+							</p>
+						</div>
+					{/if}
 				</div>
 
 				<div class="border-t border-zinc-800 px-5 py-3">

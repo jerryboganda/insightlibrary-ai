@@ -133,27 +133,71 @@ export const deltaEntrySchema = z.object({
 export type DeltaEntry = z.infer<typeof deltaEntrySchema>;
 
 // ── Study ─────────────────────────────────────────────────────────────────
+export const flashcardStateSchema = z.enum(['new', 'learning', 'review', 'relearning']);
+export type FlashcardState = z.infer<typeof flashcardStateSchema>;
+
 export const flashcardSchema = z.object({
 	id: z.string(),
 	topicId: z.string(),
 	topic: z.string(),
 	front: z.string(),
-	back: z.string()
+	back: z.string(),
+	// Optional spaced-repetition fields (present once a card has been scheduled).
+	sourceClaimId: z.string().nullish(),
+	dueAt: z.string().nullish(),
+	intervalDays: z.number().optional(),
+	easeFactor: z.number().optional(),
+	stability: z.number().optional(),
+	difficulty: z.number().optional(),
+	repetitions: z.number().int().optional(),
+	lapses: z.number().int().optional(),
+	lastReviewedAt: z.string().nullish(),
+	state: flashcardStateSchema.optional()
 });
 export type Flashcard = z.infer<typeof flashcardSchema>;
+
+/** A grade submitted when reviewing a card (Again/Hard/Good/Easy → 1..4). */
+export const flashcardGradeSchema = z.object({
+	grade: z.number().int().min(1).max(4)
+});
+export type FlashcardGrade = z.infer<typeof flashcardGradeSchema>;
+
+// ── Exam engine: MCQs / vignettes ───────────────────────────────────────────
+export const mcqOptionSchema = z.object({ id: z.string(), text: z.string() });
+export const mcqSchema = z.object({
+	id: z.string(),
+	topicId: z.string(),
+	claimId: z.string().nullish(),
+	stem: z.string(),
+	options: z.array(mcqOptionSchema),
+	correctOptionId: z.string(),
+	explanation: z.string(),
+	difficulty: z.enum(['easy', 'medium', 'hard']),
+	examTags: z.array(z.string()),
+	status: z.enum(['draft', 'published']).default('draft')
+});
+export type Mcq = z.infer<typeof mcqSchema>;
 
 // ── Knowledge graph ─────────────────────────────────────────────────────────
 export const graphNodeSchema = z.object({
 	id: z.string(),
 	group: z.string(),
-	size: z.number().positive()
+	size: z.number().positive(),
+	// Optional semantic fields (populated by the correlation engine).
+	kind: z.string().optional(),
+	label: z.string().optional(),
+	canonicalConceptId: z.string().nullish(),
+	description: z.string().optional()
 });
 export type GraphNode = z.infer<typeof graphNodeSchema>;
 
 export const graphEdgeSchema = z.object({
 	source: z.string(),
 	target: z.string(),
-	label: z.string()
+	label: z.string(),
+	rel: z.string().optional(),
+	weight: z.number().optional(),
+	sourceClaimId: z.string().nullish()
 });
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;
 
@@ -213,9 +257,15 @@ export type EvaluationMetrics = z.infer<typeof evaluationMetricsSchema>;
 export const processingStageSchema = z.enum([
 	'queued',
 	'extract',
+	'parse',
 	'chunk',
+	'contextualize',
 	'embed',
 	'index',
+	'claims',
+	'correlate',
+	'graph',
+	'refine',
 	'done',
 	'failed'
 ]);
@@ -263,3 +313,68 @@ export const notificationSchema = z.object({
 	action: z.string().nullable()
 });
 export type Notification = z.infer<typeof notificationSchema>;
+
+// ── Refinery: first-class claims, provenance, versions ──────────────────────
+export const claimTypeSchema = z.enum([
+	'fact',
+	'definition',
+	'mechanism',
+	'classification',
+	'symptom',
+	'sign',
+	'lab',
+	'diagnosis',
+	'treatment',
+	'pharmacology',
+	'complication',
+	'differential',
+	'exam_pearl',
+	'contraindication',
+	'table_fact',
+	'figure_fact'
+]);
+export type ClaimType = z.infer<typeof claimTypeSchema>;
+
+export const claimStatusSchema = z.enum(['active', 'draft', 'superseded', 'conflicted', 'retired']);
+export type ClaimStatus = z.infer<typeof claimStatusSchema>;
+
+export const claimSourceSchema = z.object({
+	id: z.string(),
+	claimId: z.string(),
+	sourceId: z.string().nullish(),
+	sourceRef: z.string().nullish(),
+	locator: z.string().nullish(),
+	documentId: z.string().nullish(),
+	chunkId: z.string().nullish(),
+	blockId: z.string().nullish(),
+	stance: z.enum(['supports', 'refutes', 'context']).default('supports')
+});
+export type ClaimSource = z.infer<typeof claimSourceSchema>;
+
+/** First-class normalized claim (distinct from the JSONB-embedded `Claim`). */
+export const normalizedClaimSchema = z.object({
+	id: z.string(),
+	topicId: z.string().nullish(),
+	sectionId: z.string().nullish(),
+	claimType: claimTypeSchema,
+	claimText: z.string(),
+	ontologyIds: z.array(z.string()),
+	systemTags: z.array(z.string()),
+	examTags: z.array(z.string()),
+	confidence: z.number(),
+	status: claimStatusSchema,
+	sources: z.array(claimSourceSchema).default([])
+});
+export type NormalizedClaim = z.infer<typeof normalizedClaimSchema>;
+
+export const topicVersionSchema = z.object({
+	id: z.string(),
+	topicId: z.string(),
+	version: z.number().int(),
+	pageMd: z.string(),
+	changelog: z.array(z.object({ type: z.string(), text: z.string(), details: z.string() })),
+	faithfulness: z.number().nullish(),
+	createdBy: z.string().nullish(),
+	createdAt: z.string()
+});
+export type TopicVersion = z.infer<typeof topicVersionSchema>;

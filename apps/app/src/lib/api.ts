@@ -17,5 +17,12 @@ export const api = new ApiClient({
 		if (!isTauri()) return null;
 		const platform = await getPlatform();
 		return platform.secrets.get('session_token').catch(() => null);
+	},
+	// Desktop only: forward a connected ChatGPT subscription token so the copilot
+	// runs on the user's subscription (experimental / off-label).
+	getAiToken: async () => {
+		if (!isTauri()) return null;
+		const { getChatGptToken } = await import('./platform/oauth');
+		return getChatGptToken().catch(() => null);
 	}
 });
