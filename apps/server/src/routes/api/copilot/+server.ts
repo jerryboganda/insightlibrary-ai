@@ -77,7 +77,7 @@ export const POST: RequestHandler = async ({ request, locals }) => {
 			const send = (type: string, value: string) =>
 				controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type, value })}\n\n`));
 			try {
-				for await (const token of streamCopilot({ mode, message, context, ctx: credential ? { credential } : undefined })) {
+				for await (const token of streamCopilot({ mode, message, context, orgId, ctx: credential ? { credential } : undefined })) {
 					send('token', token);
 				}
 				send('done', '');

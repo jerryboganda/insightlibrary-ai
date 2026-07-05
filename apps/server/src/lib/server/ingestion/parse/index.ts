@@ -23,7 +23,7 @@ export async function parseDocument(bytes: Uint8Array, filename: string, opts: P
 		(await getOrgSettings(opts.orgId ?? 'org_1').catch(() => null))?.parseMode ??
 		(process.env.PARSE_MODE as ParseOptions['mode']) ??
 		'heuristic';
-	if (mode === 'document-ai') return parseDocumentAi(bytes, filename);
+	if (mode === 'document-ai') return parseDocumentAi(bytes, filename, opts.orgId ?? 'org_1');
 	if (mode === 'external') return parseExternal(bytes, filename);
 	return parseHeuristic(bytes, filename);
 }

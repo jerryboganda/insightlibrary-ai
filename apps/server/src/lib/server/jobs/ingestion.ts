@@ -314,7 +314,7 @@ async function executePipeline(job: IngestionJob): Promise<void> {
 	// 4. Contextualize (Anthropic contextual retrieval — skipped without a provider)
 	await checkpoint();
 	await report('contextualize', 58, 'Adding contextual prefixes');
-	const prefixes = await contextualizeChunks(job.documentTitle, metaChunks.map((c) => c.content));
+	const prefixes = await contextualizeChunks(job.documentTitle, metaChunks.map((c) => c.content), ctx.orgId);
 	metaChunks.forEach((c, i) => (c.context = prefixes[i]));
 
 	// 5. Embed (context + content) — the longest paid stage, so also check for
