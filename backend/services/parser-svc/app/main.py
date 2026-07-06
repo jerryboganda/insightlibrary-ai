@@ -46,9 +46,12 @@ LOW_CONF_THRESHOLD = float(os.environ.get("LOW_CONF_THRESHOLD", "0.4"))
 # Bound OpenMP threads so torch/docling don't spin up a thread per core and
 # blow the memory/CPU budget on the shared box.
 os.environ.setdefault("OMP_NUM_THREADS", "2")
-# Cache docling model artifacts alongside the HF cache volume (/models).
-os.environ.setdefault("HF_HOME", "/models")
-os.environ.setdefault("DOCLING_ARTIFACTS_PATH", os.environ.get("HF_HOME", "/models"))
+# Do NOT set DOCLING_ARTIFACTS_PATH: it forces docling into OFFLINE artifacts
+# mode and, if the path lacks the exact expected layout, it errors with
+# "Missing safe tensors file" instead of using its model cache. Docling's
+# layout/TableFormer models are baked into the image at build time (see
+# Dockerfile: `download_models()` populates docling's default cache
+# ~/.cache/docling/models), so no runtime download or artifacts path is needed.
 
 # Lazily-initialized converter + the lock that serializes parses.
 _converter: Any = None
