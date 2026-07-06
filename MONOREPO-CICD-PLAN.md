@@ -22,13 +22,19 @@ insightlibrary-ai/            (existing GitHub repo, was the Svelte/Node monorep
 - Replace heavy CI (3-OS Tauri desktop matrix) with one fast `ci.yml`.
 - Commit + push to `main`. CI runs on GitHub.
 
-## Phase 2 — Actions -> VPS SSH deploy
-- Generate a dedicated ed25519 deploy key; append pubkey to VPS `root@185.252.233.186:~/.ssh/authorized_keys`;
-  store private key as GitHub secret `VPS_SSH_KEY` (+ `VPS_HOST`, `VPS_USER`).
-- `deploy.yml`: on push to main -> rsync repo to `/opt/insight/app` (EXCLUDE `.env*`, `.git`, `node_modules`,
-  `target`, model caches — preserve live secrets on the box) -> ssh `cd /opt/insight/app/backend &&
-  docker compose --env-file .env -f deploy/docker-compose.yml -p insight up -d --build --remove-orphans`.
-- Blast radius contained by `-p insight` + no host ports. Never touch other stacks' containers.
+## Phase 2 — Actions builds -> GHCR -> VPS pulls  (NO build on the VPS)
+Build is compute-intensive (Rust compile) and MUST run on GitHub runners, never the
+shared prod box. The VPS only pulls prebuilt images and restarts.
+- `build` job: compile + push 4 images to GHCR — `ghcr.io/jerryboganda/insight-{api,
+  worker,parser-svc,inference-svc}`, tags `:latest` + `:<sha>`, GHA layer cache.
+  api+worker share one cargo-chef compile (same Dockerfile.rust builder stage).
+- `deploy` job: rsync `backend/deploy/` -> `/opt/insight/app/deploy/` (no `--delete`;
+  exclude live cloudflared creds) then on the VPS: `docker login ghcr` (run token) ->
+  `compose.sh pull` the 4 by `<sha>` -> `compose.sh up -d --no-build --remove-orphans`
+  with `IMAGE_TAG=<sha>`. `--no-build` guarantees the box never compiles.
+- Auth: dedicated ed25519 deploy key in GitHub secret `VPS_SSH_KEY` (pubkey in VPS
+  `root@...:~/.ssh/authorized_keys`). compose services carry `image: ...:${IMAGE_TAG:-latest}`
+  (build: kept for local dev). Blast radius contained by `-p insight` + no host ports.
 
 ## Guardrails
 Shared VPS. Never publish host ports; only ingress = the `insight` cloudflared tunnel.
