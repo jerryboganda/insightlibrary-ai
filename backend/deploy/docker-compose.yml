@@ -117,6 +117,9 @@ services:
     depends_on: [caddy]
 
   parser-svc:
+    # Prod pulls this prebuilt image (built in GitHub Actions -> GHCR); `build:`
+    # is only for local dev. Deploy runs `up --no-build` so the VPS never compiles.
+    image: ghcr.io/jerryboganda/insight-parser-svc:${IMAGE_TAG:-latest}
     build: ../services/parser-svc
     volumes:
       # Docling/HF model artifacts cache here so they survive restarts and are
@@ -131,6 +134,7 @@ services:
     # Stateless file -> JSON; scale with --scale parser-svc=N if CPU allows.
 
   inference-svc:
+    image: ghcr.io/jerryboganda/insight-inference-svc:${IMAGE_TAG:-latest}
     build: ../services/inference-svc
     volumes:
       - modelcache:/models
@@ -138,6 +142,7 @@ services:
     restart: unless-stopped
 
   insight-api:
+    image: ghcr.io/jerryboganda/insight-api:${IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
@@ -161,6 +166,7 @@ services:
       retries: 5
 
   insight-worker:
+    image: ghcr.io/jerryboganda/insight-worker:${IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust

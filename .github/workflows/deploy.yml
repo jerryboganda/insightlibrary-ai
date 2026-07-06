@@ -1,11 +1,13 @@
 name: deploy
 
-# Ship the Rust backend to the shared production VPS. Triggered on push to main
-# (backend changes only) — GitHub Actions owns the deploy per the project rule.
+# Build ALL images on GitHub Actions -> push to GHCR -> the VPS only pulls and
+# restarts. Zero compilation on the shared production box (project rule).
 #
-# Mechanism: rsync backend/ -> /opt/insight/app/ (NO --delete; live-only files
-# like .env and the cloudflared tunnel creds are excluded and never touched),
-# then rebuild/restart the `insight` compose project on the box.
+#   build:  runners compile + push ghcr.io/jerryboganda/insight-{api,worker,
+#           parser-svc,inference-svc}, tagged :latest and :<sha>.
+#   deploy: rsync deploy/ config, then on the VPS: docker login ghcr -> pull the
+#           4 images by :<sha> -> compose up -d --no-build (errors if an image is
+#           missing, so the box can never fall back to building).
 
 on:
   push:
@@ -20,13 +22,82 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  REGISTRY: ghcr.io
+  OWNER: jerryboganda
   VPS_HOST: 185.252.233.186
   VPS_USER: root
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Rust: one compile (shared cargo-chef builder stage, cached in GHA) emits
+      # both the api and worker images.
+      - name: Build & push insight-api
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/deploy/Dockerfile.rust
+          target: api
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/insight-api:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/insight-api:${{ github.sha }}
+          cache-from: type=gha,scope=rust
+          cache-to: type=gha,mode=max,scope=rust
+
+      - name: Build & push insight-worker
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/deploy/Dockerfile.rust
+          target: worker
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/insight-worker:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/insight-worker:${{ github.sha }}
+          cache-from: type=gha,scope=rust
+          cache-to: type=gha,mode=max,scope=rust
+
+      - name: Build & push parser-svc
+        uses: docker/build-push-action@v6
+        with:
+          context: backend/services/parser-svc
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/insight-parser-svc:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/insight-parser-svc:${{ github.sha }}
+          cache-from: type=gha,scope=parser
+          cache-to: type=gha,mode=max,scope=parser
+
+      - name: Build & push inference-svc
+        uses: docker/build-push-action@v6
+        with:
+          context: backend/services/inference-svc
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/insight-inference-svc:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/insight-inference-svc:${{ github.sha }}
+          cache-from: type=gha,scope=inference
+          cache-to: type=gha,mode=max,scope=inference
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -37,28 +108,25 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Sync backend to VPS
+      # Ship only deploy/ config (compose, Caddyfile, scripts, postgres-init).
+      # No source, no --delete; live cloudflared tunnel creds are excluded.
+      - name: Sync deploy config to VPS
         run: |
-          rsync -az --human-readable \
-            --exclude='.git' \
-            --exclude='.env' \
-            --exclude='.env.*' \
-            --exclude='target' \
-            --exclude='node_modules' \
-            --exclude='deploy/cloudflared/config.yml' \
-            --exclude='deploy/cloudflared/*.json' \
-            --exclude='services/**/models' \
+          rsync -az \
+            --exclude='cloudflared/config.yml' \
+            --exclude='cloudflared/*.json' \
             -e "ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-            backend/ "$VPS_USER@$VPS_HOST:/opt/insight/app/"
+            backend/deploy/ "$VPS_USER@$VPS_HOST:/opt/insight/app/deploy/"
 
-      - name: Build & restart insight stack
+      - name: Pull prebuilt images & restart (no build on VPS)
         run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+            "$VPS_USER@$VPS_HOST" 'docker login ghcr.io -u ${{ github.actor }} --password-stdin'
           ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
             "$VPS_USER@$VPS_HOST" \
-            'bash /opt/insight/app/deploy/scripts/compose.sh up -d --build --remove-orphans'
+            "IMAGE_TAG=${{ github.sha }} bash /opt/insight/app/deploy/scripts/compose.sh pull insight-api insight-worker parser-svc inference-svc && IMAGE_TAG=${{ github.sha }} bash /opt/insight/app/deploy/scripts/compose.sh up -d --no-build --remove-orphans"
 
       - name: Post-deploy status
         run: |
           ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-            "$VPS_USER@$VPS_HOST" \
-            'bash /opt/insight/app/deploy/scripts/compose.sh ps'
+            "$VPS_USER@$VPS_HOST" 'bash /opt/insight/app/deploy/scripts/compose.sh ps'
