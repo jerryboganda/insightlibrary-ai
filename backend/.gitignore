@@ -1,0 +1,13 @@
+/target
+**/node_modules
+.env
+*.env
+!.env.example
+!deploy/cloudflared/config.yml.example
+deploy/cloudflared/*.json
+deploy/cloudflared/config.yml
+services/**/models/
+__pycache__/
+*.pyc
+.pytest_cache/
+/data/

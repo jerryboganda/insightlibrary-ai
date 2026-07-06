@@ -1,0 +1,10 @@
+target
+rust-toolchain.toml
+**/node_modules
+.git
+.github
+.env
+*.env
+!.env.example
+**/__pycache__
+deploy/cloudflared

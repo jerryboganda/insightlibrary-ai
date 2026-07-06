@@ -1,0 +1,24 @@
+[package]
+name = "insight-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+sqlx = { workspace = true }
+pgvector = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+redis = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+argon2 = { workspace = true }
+# Phase 4: ingest orchestration POSTs multipart uploads to parser-svc.
+reqwest = { workspace = true }
+base64 = "0.22"

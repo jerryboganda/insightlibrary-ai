@@ -1,0 +1,33 @@
+# parser-svc dependencies (Phase 4). Docling (MIT) is the primary parser.
+# MinerU (AGPL), if ever added for hard pages, would be isolated in THIS
+# container ONLY and never linked into insight-core.
+#
+# CPU-ONLY torch: the VPS is a shared CPU box (~6GB RAM). We MUST get the CPU
+# torch/torchvision wheels, never the multi-GB CUDA wheels docling's default
+# deps would otherwise pull (9x nvidia-*-cu12 libs, several GB).
+#
+# The CPU wheels on download.pytorch.org/whl/cpu carry a `+cpu` LOCAL version
+# (e.g. torch-2.5.1+cpu). A plain `torch==2.5.1` pin does NOT match `2.5.1+cpu`,
+# so `--extra-index-url` cannot make the CPU wheel win — pip would take the
+# plain `2.5.1` PyPI CUDA wheel. Two things fix this:
+#   1. Pin the local version explicitly: `torch==2.5.1+cpu`.
+#   2. Use `--index-url` (PRIMARY, CPU-only) + `--extra-index-url` for PyPI so
+#      torch/torchvision resolve solely from the CPU index while fastapi/docling
+#      still come from PyPI.
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+
+fastapi>=0.115
+uvicorn[standard]>=0.34
+python-multipart>=0.0.9
+pillow>=10.4
+
+# Pin the CPU torch build explicitly (the `+cpu` local version) so the resolver
+# can never pick a CUDA wheel. Verify in the image:
+#   python -c "import torch; print(torch.__version__)"  # -> 2.5.1+cpu
+#   pip show torch                                       # no nvidia-cu12 requires
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+
+# Docling: structure-aware PDF/office parser (layout, tables, reading order).
+docling==2.15.1

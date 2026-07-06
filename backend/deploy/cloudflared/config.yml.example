@@ -1,0 +1,19 @@
+# Dedicated tunnel for the insight stack. Created in Phase 1 with:
+#   cloudflared tunnel create insight
+#   cloudflared tunnel route dns insight insight-api.polytronx.com
+#   cloudflared tunnel route dns insight insight-s3.polytronx.com
+#   cloudflared tunnel route dns insight insight-console.polytronx.com
+# Then copy this file to config.yml, fill the tunnel ID, and place the
+# credentials JSON next to it. NEVER reuse the live `insightai` tunnel.
+
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: insight-api.polytronx.com
+    service: http://caddy:80
+  - hostname: insight-s3.polytronx.com
+    service: http://caddy:80
+  - hostname: insight-console.polytronx.com
+    service: http://caddy:80
+  - service: http_status:404

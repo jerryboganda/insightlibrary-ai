@@ -1,0 +1,11 @@
+* text=auto
+*.rs text
+*.py text
+*.toml text
+*.yml text
+*.yaml text
+*.md text
+*.sh text eol=lf
+Caddyfile text eol=lf
+deploy/scripts/post-receive text eol=lf
+Dockerfile* text eol=lf

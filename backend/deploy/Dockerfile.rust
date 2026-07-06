@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+# Shared multi-stage build for insight-api and insight-worker.
+# cargo-chef caches the dependency graph so code-only changes rebuild fast
+# on the CPU-only VPS. Build context = repo root.
+
+FROM rust:1-slim-bookworm AS chef
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo build --release -p insight-api -p insight-worker
+
+FROM debian:bookworm-slim AS runtime-base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 insight
+USER insight
+
+FROM runtime-base AS api
+COPY --from=builder /app/target/release/insight-api /usr/local/bin/insight-api
+EXPOSE 8080
+ENTRYPOINT ["insight-api"]
+
+FROM runtime-base AS worker
+COPY --from=builder /app/target/release/insight-worker /usr/local/bin/insight-worker
+# Storage selftest (run manually: docker compose ... run --rm insight-worker insight-selftest)
+COPY --from=builder /app/target/release/insight-selftest /usr/local/bin/insight-selftest
+# API acceptance test (run manually: docker compose ... run --rm insight-worker insight-apitest)
+COPY --from=builder /app/target/release/insight-apitest /usr/local/bin/insight-apitest
+# Ingest acceptance test (run manually: docker compose ... run --rm insight-worker insight-ingest-test)
+COPY --from=builder /app/target/release/insight-ingest-test /usr/local/bin/insight-ingest-test
+ENTRYPOINT ["insight-worker"]

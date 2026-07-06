@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Installed at /opt/insight/repo.git/hooks/post-receive (chmod +x).
+set -euo pipefail
+GIT_WORK_TREE=/opt/insight/app git --git-dir=/opt/insight/repo.git checkout -f main
+echo "insight: main checked out to /opt/insight/app"

@@ -1,0 +1,21 @@
+# Internal host-router only. TLS terminates at the Cloudflare edge; the
+# dedicated tunnel connects to caddy:80 over the private docker network.
+# Caddy is NOT published on the host (ports 80/443 there belong to another
+# project's nginx-proxy-manager).
+
+{
+	auto_https off
+}
+
+http://insight-api.polytronx.com {
+	reverse_proxy insight-api:8080
+}
+
+http://insight-s3.polytronx.com {
+	reverse_proxy minio:9000
+}
+
+http://insight-console.polytronx.com {
+	# MinIO console — additionally protect with Cloudflare Access.
+	reverse_proxy minio:9001
+}

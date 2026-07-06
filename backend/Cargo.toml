@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/insight-core",
+    "crates/insight-api",
+    "crates/insight-worker",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+insight-core = { path = "crates/insight-core" }
+
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+
+# Storage layer (Phase 2)
+# "derive" enables the FromRow derive; "macros" is needed for the embedded
+# sqlx::migrate!() migrator. The compile-time query!/query_as! macros are
+# NEVER used (no DB at build time, no .sqlx offline metadata) — runtime
+# sqlx::query / query_as only.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate", "derive", "macros"] }
+# =0.4.1 pin: pgvector 0.4.2 moved to sqlx 0.9; we are on sqlx 0.8.
+pgvector = { version = "=0.4.1", features = ["sqlx"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# API layer (Phase 3)
+argon2 = "0.5"
+jsonwebtoken = "9"
+# Acceptance-test binary (insight-apitest) only; rustls to avoid OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "multipart"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+
+[profile.release]
+lto = "thin"
+strip = true

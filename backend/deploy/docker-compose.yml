@@ -1,0 +1,180 @@
+# Insight Library AI — production stack on the shared VPS 185.252.233.186.
+#
+# HARD RULES for this shared box:
+#   * project name `insight` namespaces every container/volume/network
+#   * NO host ports are ever published — the only ingress is the dedicated
+#     cloudflared tunnel (the live `cloudflared-insightai.service`, pm2 apps,
+#     and `insightlibrary-*` containers are prod for OTHER stacks: never touch)
+#   * run as:  docker compose --env-file .env -f deploy/docker-compose.yml -p insight ...
+#     (from /opt/insight/app; .env lives at the repo root)
+
+name: insight
+
+networks:
+  insight: {}
+
+volumes:
+  pgdata: {}
+  redisdata: {}
+  miniodata: {}
+  modelcache: {}
+  caddydata: {}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      # POSTGRES_USER is the bootstrap SUPERUSER — for admin/maintenance only.
+      # The application NEVER connects as it: superusers bypass row-level
+      # security even with FORCE ROW LEVEL SECURITY, which would silently
+      # disable tenant isolation. The init script below creates the dedicated
+      # NON-superuser role (APP_DB_USER, default insight_app) that owns the
+      # database; DATABASE_URL must point at that role.
+      POSTGRES_USER: ${PG_USER:-insight}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-insight}
+      POSTGRES_DB: ${PG_DB:-insight}
+      APP_DB_USER: ${APP_DB_USER:-insight_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-insight_app}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs only on first init of an empty pgdata volume; for an existing
+      # volume apply deploy/postgres-init/01-app-role.sh manually via psql.
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    networks: [insight]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-insight} -d ${PG_DB:-insight}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: valkey/valkey:8
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    networks: [insight]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-insight}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-insight-minio}
+      # Presigned URLs are minted against the public host; MinIO needs to
+      # know it so signatures validate behind the tunnel.
+      MINIO_SERVER_URL: ${S3_ENDPOINT_PUBLIC:-https://insight-s3.polytronx.com}
+    volumes:
+      - miniodata:/data
+    networks: [insight]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-insight}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-insight-minio}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb -p local/documents local/figures local/thumbs local/audio local/exports &&
+      for b in documents figures thumbs audio exports; do mc anonymous set none local/$$b; done &&
+      echo 'minio buckets ready'
+      "
+    networks: [insight]
+    restart: "no"
+
+  caddy:
+    image: caddy:2
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    networks: [insight]
+    restart: unless-stopped
+    # No ports: reached only by cloudflared over the docker network.
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    networks: [insight]
+    restart: unless-stopped
+    depends_on: [caddy]
+
+  parser-svc:
+    build: ../services/parser-svc
+    volumes:
+      # Docling/HF model artifacts cache here so they survive restarts and are
+      # never re-downloaded (HF_HOME=/models, DOCLING_ARTIFACTS_PATH=/models).
+      - modelcache:/models
+    environment:
+      # Lean CPU-only knobs; PARSE_MAX_PAGES bounds peak RAM on the shared box.
+      OMP_NUM_THREADS: "2"
+      PARSE_MAX_PAGES: "40"
+    networks: [insight]
+    restart: unless-stopped
+    # Stateless file -> JSON; scale with --scale parser-svc=N if CPU allows.
+
+  inference-svc:
+    build: ../services/inference-svc
+    volumes:
+      - modelcache:/models
+    networks: [insight]
+    restart: unless-stopped
+
+  insight-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.rust
+      target: api
+    env_file:
+      - path: ../.env
+        required: false
+    networks: [insight]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  insight-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.rust
+      target: worker
+    env_file:
+      - path: ../.env
+        required: false
+    networks: [insight]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # Scale ingest throughput with: --scale insight-worker=N (RAM permitting).

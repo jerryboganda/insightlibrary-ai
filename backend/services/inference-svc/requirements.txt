@@ -1,0 +1,4 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+# Phase 5 adds: fastembed (ONNX dense/sparse/rerank, CPU) + faster-whisper.
+# Deliberately no PyTorch — the shared VPS is RAM/disk-tight.
