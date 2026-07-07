@@ -6,7 +6,7 @@
 set -euo pipefail
 cd /opt/insight/app
 
-SERVICES="insight-api insight-worker parser-svc inference-svc"
+SERVICES="insight-api insight-worker parser-svc inference-svc insight-app"
 
 # ghcr.io over the VPS's IPv6 path occasionally resets mid-layer; retry the pull.
 for i in 1 2 3 4 5; do

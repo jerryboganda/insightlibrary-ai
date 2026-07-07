@@ -4,6 +4,7 @@
 		Key,
 		Shield,
 		Settings2,
+		Bell,
 		MonitorSmartphone,
 		Check,
 		Trash2,
@@ -25,6 +26,7 @@
 	const tabs: { icon: Component; label: string }[] = [
 		{ icon: Key, label: 'My AI Keys' },
 		{ icon: Shield, label: 'Sessions & Security' },
+		{ icon: Bell, label: 'Notifications' },
 		{ icon: Settings2, label: 'Workspace Settings' }
 	];
 
@@ -142,6 +144,82 @@
 		{ label: 'Storage & Indices', description: 'Vector index, object storage', href: '/admin/settings/storage' },
 		{ label: 'Billing', description: 'Plan and payment', href: '/admin/settings/billing' }
 	];
+
+	// ── Notification preferences (persisted via /api/preferences) ─────────────
+	type NotifyPrefs = {
+		processingComplete: boolean;
+		reviewQueue: boolean;
+		weeklyDigest: boolean;
+		webhookFailures: boolean;
+		emailEnabled: boolean;
+	};
+	const NOTIFY_DEFAULTS: NotifyPrefs = {
+		processingComplete: true,
+		reviewQueue: true,
+		weeklyDigest: false,
+		webhookFailures: true,
+		emailEnabled: false
+	};
+	const notifyRows: { key: keyof NotifyPrefs; label: string; description: string }[] = [
+		{
+			key: 'processingComplete',
+			label: 'Document processing complete',
+			description: 'When a document finishes ingesting and is ready to use.'
+		},
+		{
+			key: 'reviewQueue',
+			label: 'Review queue items',
+			description: 'When correlation surfaces a conflict that needs review.'
+		},
+		{
+			key: 'weeklyDigest',
+			label: 'Weekly digest',
+			description: 'A weekly summary of library and knowledge activity.'
+		},
+		{
+			key: 'webhookFailures',
+			label: 'Webhook delivery failures',
+			description: 'When an outbound webhook fails to deliver.'
+		},
+		{
+			key: 'emailEnabled',
+			label: 'Email notifications',
+			description: 'Also send the above as email, where the server is configured for it.'
+		}
+	];
+	let notify = $state<NotifyPrefs>({ ...NOTIFY_DEFAULTS });
+	let notifyLoading = $state(true);
+	let notifySaving = $state(false);
+	let notifySaved = $state(false);
+	let notifyError = $state('');
+
+	async function loadNotifyPrefs() {
+		notifyLoading = true;
+		try {
+			const prefs = await api.getPreferences();
+			const stored = (prefs.notifications ?? {}) as Partial<NotifyPrefs>;
+			notify = { ...NOTIFY_DEFAULTS, ...stored };
+		} catch {
+			notify = { ...NOTIFY_DEFAULTS };
+		} finally {
+			notifyLoading = false;
+		}
+	}
+	onMount(loadNotifyPrefs);
+
+	async function saveNotifyPrefs() {
+		notifySaving = true;
+		notifyError = '';
+		notifySaved = false;
+		try {
+			await api.savePreferences({ notifications: { ...notify } });
+			notifySaved = true;
+		} catch (e) {
+			notifyError = e instanceof Error ? e.message : 'Could not save preferences.';
+		} finally {
+			notifySaving = false;
+		}
+	}
 </script>
 
 <main class="w-full overflow-y-auto">
@@ -319,6 +397,58 @@
 									{/if}
 								</div>
 							{/each}
+						</div>
+					{/if}
+				</div>
+			{:else if activeTab === 'Notifications'}
+				<div
+					class="overflow-hidden rounded-xl border border-zinc-800 glass-panel"
+					in:fly={{ y: 8, duration: 300 }}
+				>
+					<div class="border-b border-zinc-800 bg-zinc-900/50 px-6 py-4">
+						<h2 class="text-lg font-semibold text-zinc-200">Notifications</h2>
+						<p class="text-sm text-zinc-500">
+							Choose which events create in-app notifications, and whether to also receive email.
+						</p>
+					</div>
+					{#if notifyLoading}
+						<div class="space-y-3 p-6">
+							{#each Array(4) as _, i (i)}
+								<Skeleton class="h-12 rounded-lg" />
+							{/each}
+						</div>
+					{:else}
+						<div class="divide-y divide-zinc-800/60">
+							{#each notifyRows as row (row.key)}
+								<label class="flex cursor-pointer items-center justify-between gap-4 p-5">
+									<div>
+										<p class="text-sm font-medium text-zinc-200">{row.label}</p>
+										<p class="mt-0.5 text-xs text-zinc-500">{row.description}</p>
+									</div>
+									<input
+										type="checkbox"
+										bind:checked={notify[row.key]}
+										class="h-4 w-4 shrink-0 accent-indigo-500"
+									/>
+								</label>
+							{/each}
+						</div>
+						<div class="flex items-center justify-end gap-3 border-t border-zinc-800 px-6 py-4">
+							{#if notifyError}
+								<span class="text-xs text-rose-400">{notifyError}</span>
+							{/if}
+							{#if notifySaved}
+								<span class="flex items-center gap-1 text-xs text-emerald-400">
+									<Check class="h-3.5 w-3.5" /> Saved
+								</span>
+							{/if}
+							<button
+								onclick={saveNotifyPrefs}
+								disabled={notifySaving}
+								class="flex items-center gap-1.5 rounded-md border border-indigo-500/50 bg-zinc-950 px-4 py-2 text-sm font-medium text-indigo-400 hover:bg-indigo-500/10 disabled:opacity-40"
+							>
+								<Check class="h-4 w-4" /> Save preferences
+							</button>
 						</div>
 					{/if}
 				</div>

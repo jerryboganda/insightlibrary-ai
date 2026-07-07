@@ -12,7 +12,11 @@
 		Clock,
 		Loader2,
 		CheckCircle2,
-		AlertCircle
+		AlertCircle,
+		Trash2,
+		Search,
+		Sparkles,
+		BarChart3
 	} from '@lucide/svelte';
 	import { fade, fly, scale } from 'svelte/transition';
 	import { api } from '$lib/api';
@@ -170,6 +174,43 @@
 		isNewOpen = true;
 	}
 
+	// ── Knowledge-graph coverage (GET /api/graph/stats) ──────────────────────────
+	const graphStats = createQuery({ queryKey: ['graph-stats'], queryFn: () => api.getGraphStats() });
+
+	// ── Delete a registry ontology (DELETE /api/ontologies/{id}) ─────────────────
+	let pendingDelete = $state<Ontology | null>(null);
+	const deleteOntology = createMutation({
+		mutationFn: (id: string) => api.deleteOntology(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ['ontologies'] });
+			pendingDelete = null;
+		}
+	});
+	function doDelete() {
+		if (pendingDelete) $deleteOntology.mutate(pendingDelete.id);
+	}
+
+	// ── Query-expansion probe (GET /api/ontology/expand?q=) ──────────────────────
+	let expandQuery = $state('');
+	let expandAliases = $state<string[] | null>(null);
+	let expandLoading = $state(false);
+	let expandError = $state('');
+	async function runExpand() {
+		const q = expandQuery.trim();
+		if (!q) return;
+		expandLoading = true;
+		expandError = '';
+		expandAliases = null;
+		try {
+			const res = await api.expandOntology(q);
+			expandAliases = res.aliases;
+		} catch (e) {
+			expandError = errMsg(e);
+		} finally {
+			expandLoading = false;
+		}
+	}
+
 	const importPlaceholder = `Loader JSON:
 { "concepts": [ { "prefLabel": "Sepsis", "kind": "disease", "synonyms": ["septicaemia"] } ] }
 
@@ -208,6 +249,69 @@ Hypertension | high blood pressure
 			</div>
 		</header>
 
+		<div class="grid gap-4 lg:grid-cols-[1fr_1.2fr]">
+			<div class="glass-panel rounded-xl border border-zinc-800 p-5">
+				<h2 class="mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-200">
+					<BarChart3 class="h-4 w-4 text-indigo-400" /> Knowledge Graph
+				</h2>
+				{#if $graphStats.isLoading}
+					<Skeleton class="h-16 rounded-lg" />
+				{:else if $graphStats.isError}
+					<p class="text-xs text-zinc-500">Graph stats unavailable.</p>
+				{:else if $graphStats.data}
+					<div class="grid grid-cols-3 gap-3 text-center">
+						<div>
+							<div class="text-xl font-bold text-zinc-100">{$graphStats.data.nodes}</div>
+							<div class="text-[10px] tracking-wider text-zinc-500 uppercase">Nodes</div>
+						</div>
+						<div>
+							<div class="text-xl font-bold text-zinc-100">{$graphStats.data.edges}</div>
+							<div class="text-[10px] tracking-wider text-zinc-500 uppercase">Edges</div>
+						</div>
+						<div>
+							<div class="text-xl font-bold text-zinc-100">{$graphStats.data.communities ?? '—'}</div>
+							<div class="text-[10px] tracking-wider text-zinc-500 uppercase">Communities</div>
+						</div>
+					</div>
+				{/if}
+			</div>
+			<div class="glass-panel rounded-xl border border-zinc-800 p-5">
+				<h2 class="mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-200">
+					<Sparkles class="h-4 w-4 text-indigo-400" /> Expand a Query
+				</h2>
+				<div class="flex gap-2">
+					<input
+						type="text"
+						bind:value={expandQuery}
+						onkeydown={(e) => e.key === 'Enter' && runExpand()}
+						placeholder="e.g. heart attack"
+						class="flex-1 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-indigo-500/50 focus:outline-none"
+					/>
+					<button
+						onclick={runExpand}
+						disabled={expandLoading || !expandQuery.trim()}
+						class="flex items-center gap-1.5 rounded-md border border-indigo-500/50 bg-zinc-950 px-3 py-2 text-sm font-medium text-indigo-400 hover:bg-indigo-500/10 disabled:opacity-40"
+					>
+						{#if expandLoading}<Loader2 class="h-4 w-4 animate-spin" />{:else}<Search class="h-4 w-4" />{/if}
+						Expand
+					</button>
+				</div>
+				{#if expandError}
+					<p class="mt-2 text-xs text-rose-400">{expandError}</p>
+				{:else if expandAliases}
+					{#if expandAliases.length}
+						<div class="mt-3 flex flex-wrap gap-2">
+							{#each expandAliases as alias (alias)}
+								<span class="rounded border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[10px] text-zinc-300">{alias}</span>
+							{/each}
+						</div>
+					{:else}
+						<p class="mt-2 text-xs text-zinc-500">No aliases found for that term.</p>
+					{/if}
+				{/if}
+			</div>
+		</div>
+
 		{#if $ontologies.isLoading}
 			<div class="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
 				{#each Array(3) as _, i (i)}
@@ -241,7 +345,8 @@ Hypertension | high blood pressure
 				{#each $ontologies.data ?? [] as o, i (o.id)}
 					{@const decor = decorFor(o)}
 					{@const Icon = decor.icon}
-					<a in:fly={{ y: 10, duration: 250, delay: i * 50 }} href={`/admin/ontology/${o.id}`} class="flex">
+					<div in:fly={{ y: 10, duration: 250, delay: i * 50 }} class="group/card relative flex">
+						<a href={`/admin/ontology/${o.id}`} class="flex w-full">
 						<div
 							class="group glass-panel flex w-full cursor-pointer flex-col overflow-hidden rounded-xl border-zinc-800 transition-colors hover:border-indigo-500/50"
 						>
@@ -277,7 +382,16 @@ Hypertension | high blood pressure
 								</span>
 							</div>
 						</div>
-					</a>
+						</a>
+						<button
+							onclick={() => (pendingDelete = o)}
+							title="Delete ontology"
+							aria-label="Delete ontology"
+							class="absolute top-3 right-3 z-10 rounded-md border border-zinc-800 bg-zinc-950/80 p-1.5 text-zinc-500 opacity-0 transition-opacity group-hover/card:opacity-100 hover:bg-rose-500/10 hover:text-rose-400 focus:opacity-100"
+						>
+							<Trash2 class="h-4 w-4" />
+						</button>
+					</div>
 				{/each}
 			</div>
 		{/if}
@@ -353,6 +467,65 @@ Hypertension | high blood pressure
 						<Loader2 class="h-4 w-4 animate-spin" /> Creating…
 					{:else}
 						Create Ontology
+					{/if}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Delete Ontology Confirm Modal -->
+{#if pendingDelete}
+	<div
+		transition:fade={{ duration: 150 }}
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+		onclick={(e) => {
+			if (e.target === e.currentTarget) pendingDelete = null;
+		}}
+		role="presentation"
+	>
+		<div
+			transition:scale={{ duration: 180, start: 0.95, opacity: 0 }}
+			class="w-full max-w-md overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+			role="dialog"
+			aria-modal="true"
+		>
+			<div class="border-b border-zinc-800 bg-zinc-900/30 p-6">
+				<h2 class="flex items-center gap-2 text-lg font-semibold text-zinc-100">
+					<Trash2 class="h-5 w-5 text-rose-400" /> Delete Ontology
+				</h2>
+			</div>
+			<div class="space-y-3 p-6">
+				<p class="text-sm text-zinc-300">
+					Permanently delete <span class="font-semibold text-zinc-100">{pendingDelete.name}</span> and
+					all its concepts, synonyms and relations? This cannot be undone.
+				</p>
+				{#if $deleteOntology.isError}
+					<div
+						class="flex items-start gap-2 rounded-md border border-rose-900/50 bg-rose-950/20 p-3 text-xs text-rose-300"
+					>
+						<AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+						<span>{errMsg($deleteOntology.error)}</span>
+					</div>
+				{/if}
+			</div>
+			<div class="flex justify-end gap-3 border-t border-zinc-800 bg-zinc-900/50 p-4">
+				<button
+					onclick={() => (pendingDelete = null)}
+					disabled={$deleteOntology.isPending}
+					class="px-4 py-2 text-sm font-medium text-zinc-300 transition-colors hover:text-zinc-100 disabled:opacity-40"
+				>
+					Cancel
+				</button>
+				<button
+					onclick={doDelete}
+					disabled={$deleteOntology.isPending}
+					class="flex items-center gap-2 rounded-md bg-rose-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:opacity-50"
+				>
+					{#if $deleteOntology.isPending}
+						<Loader2 class="h-4 w-4 animate-spin" /> Deleting…
+					{:else}
+						<Trash2 class="h-4 w-4" /> Delete
 					{/if}
 				</button>
 			</div>

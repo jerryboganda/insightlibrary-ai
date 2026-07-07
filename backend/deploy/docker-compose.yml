@@ -201,3 +201,17 @@ services:
       minio:
         condition: service_healthy
     # Scale ingest throughput with: --scale insight-worker=N (RAM permitting).
+
+  insight-app:
+    # Static SPA (apps/app, web target) served by Caddy on :80; the front-door
+    # caddy reverse-proxies the web host here. Prod pulls the prebuilt GHCR image;
+    # `build:` is local-dev only. VITE_API_URL is baked at BUILD time (see the
+    # build-arg in .github/workflows/deploy.yml), so there is no runtime API env.
+    image: ghcr.io/jerryboganda/insight-app:${IMAGE_TAG:-latest}
+    build:
+      context: ../..
+      dockerfile: apps/app/Dockerfile
+      args:
+        VITE_API_URL: ${WEB_API_URL:-https://insight-api.polytronx.com}
+    networks: [insight]
+    restart: unless-stopped

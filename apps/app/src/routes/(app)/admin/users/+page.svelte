@@ -369,7 +369,7 @@
 											{:else if user.hasLogin === false}
 												<span
 													class="flex items-center gap-1.5 text-xs font-medium text-zinc-500"
-													title="Seed/local record — no better-auth login account exists for this email"
+													title="Seed/local record — no login account exists for this email"
 												>
 													<Info class="h-3.5 w-3.5" /> No login account
 												</span>
@@ -509,7 +509,7 @@
 						{#if selectedUser.hasLogin === false}
 							<span
 								class="flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-[10px] font-medium tracking-wider text-zinc-400 uppercase"
-								title="No better-auth account exists for this email — security actions are unavailable"
+								title="No login account exists for this email — security actions are unavailable"
 							>
 								<Info class="h-3 w-3" /> No login account
 							</span>
@@ -576,7 +576,7 @@
 						</h4>
 						{#if selectedUser.hasLogin === false}
 							<p class="text-xs text-zinc-500">
-								This record has no better-auth login account, so there is no password to reset and no
+								This record has no login account, so there is no password to reset and no
 								sessions to revoke.
 							</p>
 						{:else}
@@ -840,7 +840,7 @@
 			<div class="flex items-center justify-between border-b border-zinc-800 bg-zinc-900/50 px-6 py-4">
 				<h2 class="flex items-center gap-2 font-semibold text-zinc-100">
 					<Key class="h-4 w-4 text-indigo-400" />
-					Enterprise SSO &amp; SCIM
+					Enterprise SSO
 				</h2>
 				<button
 					onclick={() => (isSsoModalOpen = false)}
@@ -856,19 +856,19 @@
 					>
 						Not configured
 					</span>
-					<span class="text-xs text-zinc-500">Authentication is email + password (better-auth).</span>
+					<span class="text-xs text-zinc-500">Authentication is email + password.</span>
 				</div>
 				<p class="text-sm leading-relaxed text-zinc-400">
-					Single sign-on (SAML/OIDC) and SCIM directory sync are not available on this deployment.
+					Single sign-on (SAML/OIDC) is not available on this deployment.
 					There is nothing to set up from this screen — enabling SSO is a server-side change:
 				</p>
 				<ul class="list-disc space-y-1.5 pl-5 text-xs leading-relaxed text-zinc-500">
 					<li>
-						Install and configure a better-auth SSO plugin (e.g. <code class="text-zinc-400">@better-auth/sso</code>)
+						Add a SAML/OIDC integration (SP/IdP metadata, ACS URL)
 						in the API server's auth configuration.
 					</li>
 					<li>Add persistent identity-provider settings (certificates, ACS/entity IDs) server-side.</li>
-					<li>SCIM provisioning additionally requires dedicated SCIM endpoints — not yet implemented.</li>
+					<li>Directory provisioning would require dedicated endpoints — not yet implemented.</li>
 				</ul>
 				<p class="text-xs text-zinc-500">
 					Until then, manage access with invitations, roles, suspension and forced logout — all of

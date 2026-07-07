@@ -26,6 +26,7 @@ import type {
 	ReviewItem,
 	SearchResponse,
 	SessionResponse,
+	SessionUser,
 	Source,
 	Topic,
 	TopicSection,
@@ -39,11 +40,46 @@ import type {
 export interface ApiClientOptions {
 	/** e.g. http://localhost:5174 in dev, https://api.insightlibrary.ai in prod */
 	baseUrl: string;
-	/** Bearer token supplier (Tauri: OS keyring). Web relies on cookies instead. */
+	/** Bearer access-token supplier (Tauri: OS keyring). Web relies on cookies instead. */
 	getToken?: () => Promise<string | null>;
+	/**
+	 * Refresh-token supplier for the 401→refresh→retry flow. Desktop returns the
+	 * stored refresh token (sent in the body); web returns null and relies on the
+	 * refresh cookie the server set at `/api/auth`.
+	 */
+	getRefreshToken?: () => Promise<string | null>;
+	/**
+	 * Persist rotated tokens after sign-in / sign-up / refresh. Desktop writes them
+	 * to the OS keyring; web is a no-op (the server rotates cookies itself).
+	 */
+	onTokens?: (tokens: AuthTokens) => void | Promise<void>;
 	/** Optional forwarded AI OAuth token (desktop ChatGPT subscription) for copilot. */
 	getAiToken?: () => Promise<string | null>;
 	fetchImpl?: typeof fetch;
+}
+
+/** Access + refresh JWT pair (matches the Rust auth endpoints' body). */
+export interface AuthTokens {
+	accessToken: string;
+	refreshToken: string;
+}
+
+/** Successful sign-in / sign-up response: the session user, org, and token pair. */
+export interface AuthSuccess extends AuthTokens {
+	user: SessionUser;
+	org: { id: string; name: string };
+}
+
+/** A device session row from `GET /api/auth/sessions`. `token` is the session id. */
+export interface AuthSessionRow {
+	id: string;
+	token: string;
+	userAgent?: string | null;
+	ipAddress?: string | null;
+	createdAt: string;
+	expiresAt: string;
+	lastSeenAt?: string | null;
+	current: boolean;
 }
 
 export class ApiError extends Error {
@@ -306,7 +342,23 @@ export interface GoldenRecord {
 export class ApiClient {
 	constructor(private readonly options: ApiClientOptions) {}
 
-	private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+	/** In-flight refresh, shared so concurrent 401s trigger exactly one refresh. */
+	private refreshInFlight: Promise<boolean> | null = null;
+
+	/** One-shot token refresh, de-duplicated across concurrent callers. */
+	private tryRefresh(): Promise<boolean> {
+		if (!this.refreshInFlight) {
+			this.refreshInFlight = this.refreshSession()
+				.then(() => true)
+				.catch(() => false)
+				.finally(() => {
+					this.refreshInFlight = null;
+				});
+		}
+		return this.refreshInFlight;
+	}
+
+	private async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
 		const fetchImpl = this.options.fetchImpl ?? fetch;
 		const headers = new Headers(init.headers);
 		headers.set('Accept', 'application/json');
@@ -320,6 +372,11 @@ export class ApiClient {
 			...init,
 			headers
 		});
+		// One-shot 401 recovery: refresh the session, then replay the request once.
+		// Auth endpoints are exempt so a failing refresh can never recurse.
+		if (response.status === 401 && retry && !path.startsWith('/api/auth/')) {
+			if (await this.tryRefresh()) return this.request<T>(path, init, false);
+		}
 		if (!response.ok) throw new ApiError(response.status, await response.text());
 		return response.json() as Promise<T>;
 	}
@@ -331,6 +388,51 @@ export class ApiClient {
 	// System
 	health = () => this.request<HealthResponse>('/api/health');
 	session = () => this.request<SessionResponse>('/api/session');
+
+	// Auth — session lifecycle. sign-in/up/refresh persist rotated tokens via
+	// onTokens; the web path additionally relies on the server's Set-Cookie.
+	private async authSuccess(path: string, input: unknown): Promise<AuthSuccess> {
+		const res = await this.request<AuthSuccess>(
+			path,
+			{ method: 'POST', body: JSON.stringify(input) },
+			false
+		);
+		await this.options.onTokens?.({ accessToken: res.accessToken, refreshToken: res.refreshToken });
+		return res;
+	}
+	signIn = (input: { email: string; password: string }) =>
+		this.authSuccess('/api/auth/sign-in', input);
+	signUp = (input: { email: string; password: string; name: string }) =>
+		this.authSuccess('/api/auth/sign-up', input);
+	/** Refresh the token pair. Desktop sends the stored refresh token in the body;
+	 * web relies on the refresh cookie. Throws on failure. */
+	refreshSession = async (): Promise<AuthTokens> => {
+		const rt = await this.options.getRefreshToken?.();
+		const tokens = await this.request<AuthTokens>(
+			'/api/auth/refresh',
+			{ method: 'POST', body: rt ? JSON.stringify({ refreshToken: rt }) : undefined },
+			false
+		);
+		await this.options.onTokens?.(tokens);
+		return tokens;
+	};
+	signOut = async () => {
+		const rt = await this.options.getRefreshToken?.();
+		return this.request<{ ok: true }>('/api/auth/sign-out', {
+			method: 'POST',
+			body: rt ? JSON.stringify({ refreshToken: rt }) : undefined
+		});
+	};
+	listAuthSessions = () => this.request<{ items: AuthSessionRow[] }>('/api/auth/sessions');
+	revokeAuthSession = (token: string) =>
+		this.request<{ ok: true }>('/api/auth/sessions/revoke', {
+			method: 'POST',
+			body: JSON.stringify({ token })
+		});
+	revokeOtherAuthSessions = () =>
+		this.request<{ ok: true; revoked: number }>('/api/auth/sessions/revoke-others', {
+			method: 'POST'
+		});
 
 	// Library
 	listFolders = () => this.request<ListEnvelope<Folder>>('/api/folders').then((r) => r.items);
@@ -835,17 +937,26 @@ export class ApiClient {
 		attachment?: CopilotAttachment;
 	}) => {
 		const fetchImpl = this.options.fetchImpl ?? fetch;
-		const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'text/event-stream' });
-		const token = await this.options.getToken?.();
-		if (token) headers.set('Authorization', `Bearer ${token}`);
-		const aiToken = await this.options.getAiToken?.();
-		if (aiToken) headers.set('x-ai-oauth-token', aiToken);
-		return fetchImpl(`${this.options.baseUrl}/api/copilot`, {
-			method: 'POST',
-			credentials: 'include',
-			headers,
-			body: JSON.stringify(input)
-		});
+		const send = async () => {
+			const headers = new Headers({
+				'Content-Type': 'application/json',
+				Accept: 'text/event-stream'
+			});
+			const token = await this.options.getToken?.();
+			if (token) headers.set('Authorization', `Bearer ${token}`);
+			const aiToken = await this.options.getAiToken?.();
+			if (aiToken) headers.set('x-ai-oauth-token', aiToken);
+			return fetchImpl(`${this.options.baseUrl}/api/copilot`, {
+				method: 'POST',
+				credentials: 'include',
+				headers,
+				body: JSON.stringify(input)
+			});
+		};
+		// Mirror request()'s one-shot 401→refresh→retry for the streaming path.
+		let response = await send();
+		if (response.status === 401 && (await this.tryRefresh())) response = await send();
+		return response;
 	};
 }
 

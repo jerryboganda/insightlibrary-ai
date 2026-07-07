@@ -1,0 +1,10 @@
+# Applies only to builds whose context is the repo root (the apps/app FE image).
+# The backend images use context: backend/** and are unaffected.
+**/node_modules
+.git
+.github
+**/target
+**/build
+**/.svelte-kit
+**/dist
+**/*.log

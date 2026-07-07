@@ -19,3 +19,16 @@ http://insight-console.polytronx.com {
 	# MinIO console — additionally protect with Cloudflare Access.
 	reverse_proxy minio:9001
 }
+
+# Rebuilt Svelte web app (SPA). Primary, conflict-free hostname on this stack's
+# own tunnel.
+http://insight-app.polytronx.com {
+	reverse_proxy insight-app:80
+}
+
+# Future cutover: caddy already serves the legacy hostname here, so switching the
+# rebuild to be the primary site is only a cloudflared/DNS route change — do NOT
+# add the tunnel ingress until insightai.polytronx.com is moved off the old stack.
+http://insightai.polytronx.com {
+	reverse_proxy insight-app:80
+}

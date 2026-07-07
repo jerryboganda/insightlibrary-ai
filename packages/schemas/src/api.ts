@@ -30,7 +30,10 @@ export type SessionUser = z.infer<typeof sessionUserSchema>;
 
 export const sessionResponseSchema = z.object({
 	authenticated: z.boolean(),
-	user: sessionUserSchema.nullable()
+	user: sessionUserSchema.nullable(),
+	/** Present when authenticated: the active org and the current session id. */
+	org: z.object({ id: z.string(), name: z.string() }).optional(),
+	sessionToken: z.string().nullish()
 });
 export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 

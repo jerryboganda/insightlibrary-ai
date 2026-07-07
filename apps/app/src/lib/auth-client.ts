@@ -1,68 +1,110 @@
-import { createAuthClient } from 'better-auth/svelte';
-import { adminClient, organizationClient } from 'better-auth/client/plugins';
+import { ApiError } from '@insightlibrary/api-client';
+import { api } from '$lib/api';
 import { getPlatform, isTauri } from '$lib/platform';
+import { SESSION_TOKEN_KEY, SESSION_REFRESH_KEY } from '$lib/auth-keys';
 
 /**
- * better-auth client. Talks to the API's /api/auth/* endpoints. On web this uses
- * same-origin cookie sessions; in dev (no server DB) auth is bypassed, so the
- * login page falls straight through.
+ * Auth client — an ApiClient-backed shim over the Rust API's `/api/auth/*`
+ * endpoints. It preserves the exact call/return surface the login and settings
+ * pages depend on (previously supplied by better-auth), so those pages are
+ * unchanged.
  *
- * Desktop (Tauri): the server's better-auth `bearer` plugin returns the session
- * token in a `set-auth-token` response header on sign-in/up. We capture it here
- * and store it in the OS keyring so `api.ts` can send it as a Bearer header —
- * the Tauri webview cannot rely on cookies surviving across origins/restarts.
+ * - Web: same-origin cookie sessions travel automatically (`credentials:'include'`).
+ * - Desktop (Tauri): sign-in/up return `{ accessToken, refreshToken }` in the body;
+ *   `$lib/api` persists them to the OS keyring via `onTokens`, and reads the access
+ *   token back for the Bearer header. No response-header capture is needed.
  */
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:5174';
 
-/** Keyring key for the desktop session token — must match api.ts getToken. */
-export const SESSION_TOKEN_KEY = 'session_token';
+/** Re-exported for callers that key the desktop keyring by name. */
+export { SESSION_TOKEN_KEY };
 
-export const authClient = createAuthClient({
-	baseURL: API_BASE,
-	// Typed client mirrors of the server's organization + admin plugins
-	// (auth-config.ts), so invitation/session-management flows can call
-	// authClient.organization.* / authClient.admin.* directly when needed.
-	plugins: [organizationClient(), adminClient()],
-	fetchOptions: {
-		onSuccess: async (ctx) => {
-			if (!isTauri()) return;
-			// bearer plugin: fresh session token rides on this header after sign-in.
-			const token = ctx.response.headers.get('set-auth-token');
-			if (!token) return;
-			try {
-				const platform = await getPlatform();
-				await platform.secrets.set(SESSION_TOKEN_KEY, token);
-			} catch (e) {
-				console.error(
-					'[auth] failed to persist session token to keyring:',
-					e instanceof Error ? e.message : e
-				);
-			}
+/** Pull a human-readable message out of an ApiError body (JSON `{message|error|
+ * detail}` else raw text), or any other thrown value. */
+function errorMessage(e: unknown): string {
+	if (e instanceof ApiError) {
+		try {
+			const parsed = JSON.parse(e.body) as Record<string, unknown>;
+			const msg = parsed.message ?? parsed.error ?? parsed.detail;
+			if (typeof msg === 'string' && msg.trim()) return msg;
+		} catch {
+			// Body was not JSON — fall through to the raw text.
 		}
+		return e.body?.trim() || `Request failed (${e.status})`;
 	}
-});
+	return e instanceof Error ? e.message : 'Something went wrong.';
+}
 
-/** Remove the desktop keyring session token. No-op on web or when absent. */
+type AuthResult = { data?: unknown; error?: { status: number; message: string } };
+
+/** Run an auth call, mapping success/failure to the `{ data, error }` shape the
+ * login page expects (it reads `error.status` and `error.message`). */
+async function run(fn: () => Promise<unknown>): Promise<AuthResult> {
+	try {
+		return { data: await fn() };
+	} catch (e) {
+		return { error: { status: e instanceof ApiError ? e.status : 0, message: errorMessage(e) } };
+	}
+}
+
+export const authClient = {
+	signIn: {
+		email: (input: { email: string; password: string }) => run(() => api.signIn(input))
+	},
+	signUp: {
+		email: (input: { email: string; password: string; name: string }) =>
+			run(() => api.signUp(input))
+	},
+	signOut: async () => {
+		try {
+			await api.signOut();
+		} catch {
+			// Best-effort: the local keyring is still cleared by signOutEverywhere.
+		}
+	},
+	getSession: async () => {
+		try {
+			const s = await api.session();
+			return {
+				data: { session: { token: s.sessionToken ?? null }, user: s.user },
+				error: undefined
+			};
+		} catch {
+			return { data: { session: { token: null }, user: null }, error: undefined };
+		}
+	},
+	listSessions: async () => {
+		try {
+			const r = await api.listAuthSessions();
+			return { data: r.items, error: undefined };
+		} catch (e) {
+			return { data: undefined, error: { message: errorMessage(e) } };
+		}
+	},
+	revokeSession: async ({ token }: { token: string }) => {
+		await api.revokeAuthSession(token);
+	},
+	revokeOtherSessions: async () => {
+		await api.revokeOtherAuthSessions();
+	}
+};
+
+/** Remove the desktop keyring session tokens. No-op on web or when absent. */
 export async function clearSessionToken(): Promise<void> {
 	if (!isTauri()) return;
 	try {
 		const platform = await getPlatform();
 		await platform.secrets.delete(SESSION_TOKEN_KEY);
+		await platform.secrets.delete(SESSION_REFRESH_KEY);
 	} catch {
-		// Key was never written (web-style session) — nothing to clear.
+		// Keys were never written (web-style session) — nothing to clear.
 	}
 }
 
 /**
- * Sign out everywhere: revoke the better-auth session (cookie/bearer) and wipe
- * the desktop keyring token so `api.ts` stops sending a stale Bearer header.
+ * Sign out everywhere: revoke the server session (cookie + refresh jti) and wipe
+ * the desktop keyring tokens so `$lib/api` stops sending a stale Bearer header.
  */
 export async function signOutEverywhere(): Promise<void> {
-	try {
-		await authClient.signOut();
-	} catch {
-		// Dev-bypass servers have no auth endpoints; a network blip should still
-		// not strand the local token below.
-	}
+	await authClient.signOut();
 	await clearSessionToken();
 }

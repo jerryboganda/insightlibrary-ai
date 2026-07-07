@@ -21,7 +21,7 @@ fn stripe_key() -> Option<String> {
 }
 
 fn web_origin() -> String {
-    std::env::var("WEB_ORIGIN").unwrap_or_else(|_| "https://insightai.polytronx.com".into())
+    std::env::var("WEB_ORIGIN").unwrap_or_else(|_| "https://insight-app.polytronx.com".into())
 }
 
 /// POST form-encoded params to the Stripe API.

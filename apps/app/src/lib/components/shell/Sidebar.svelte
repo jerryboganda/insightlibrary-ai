@@ -17,6 +17,7 @@
 		CreditCard,
 		Server,
 		Users,
+		Database,
 		ShieldCheck,
 		Settings,
 		BookOpen,
@@ -39,6 +40,24 @@
 	const pendingReviews = $derived(
 		($review.data ?? []).filter((r) => r.status === 'pending').length
 	);
+
+	// Real signed-in identity for the sidebar footer (shares the ['session'] cache
+	// key with the auth guard / other pages). Falls back gracefully pre-load.
+	const session = createQuery({ queryKey: ['session'], queryFn: () => api.session() });
+	const identity = $derived.by(() => {
+		const user = $session.data?.user ?? null;
+		const name = user?.name?.trim() || (user?.email ?? 'Not signed in');
+		const org = $session.data?.org?.name ?? user?.orgName ?? '';
+		const initials =
+			name
+				.split(/\s+/)
+				.map((part) => part[0])
+				.filter(Boolean)
+				.slice(0, 2)
+				.join('')
+				.toUpperCase() || 'IL';
+		return { name, org, initials };
+	});
 
 	// SSOT Studio deep-links to the most recently updated topic; before topics
 	// load (or when none exist) it falls back to the topic registry.
@@ -82,6 +101,7 @@
 		{ icon: CreditCard, label: 'Usage & Cost', href: '/admin/usage', badge: null },
 		{ icon: Server, label: 'Processing Pipeline', href: '/admin/processing', badge: null },
 		{ icon: Users, label: 'Users & Roles', href: '/admin/users', badge: null },
+		{ icon: Database, label: 'Source Registry', href: '/admin/sources', badge: null },
 		{ icon: Network, label: 'Domain Ontologies', href: '/admin/ontology', badge: null },
 		{ icon: ShieldCheck, label: 'Audit Logs', href: '/admin/audit-logs', badge: null },
 		{ icon: Settings, label: 'Settings', href: '/admin/settings/general', badge: null }
@@ -169,11 +189,13 @@
 			<div
 				class="flex h-8 w-8 items-center justify-center rounded-full bg-indigo-500/20 text-xs font-bold text-indigo-300"
 			>
-				IL
+				{identity.initials}
 			</div>
-			<a href="/login" class="flex flex-1 flex-col">
-				<span class="text-xs font-medium text-zinc-200">System Admin</span>
-				<span class="font-mono text-[10px] text-zinc-500">Tenant ID: 9021</span>
+			<a href="/settings" class="flex flex-1 flex-col overflow-hidden">
+				<span class="truncate text-xs font-medium text-zinc-200">{identity.name}</span>
+				{#if identity.org}
+					<span class="truncate text-[10px] text-zinc-500">{identity.org}</span>
+				{/if}
 			</a>
 			<button
 				onclick={handleSignOut}

@@ -16,4 +16,11 @@ ingress:
     service: http://caddy:80
   - hostname: insight-console.polytronx.com
     service: http://caddy:80
+  - hostname: insight-app.polytronx.com
+    service: http://caddy:80
+  # Cutover (optional): the rebuilt web app can also own the legacy hostname.
+  # Only add this AFTER moving insightai.polytronx.com's DNS/tunnel off the old
+  # stack — it currently belongs to a separate live prod deployment.
+  # - hostname: insightai.polytronx.com
+  #   service: http://caddy:80
   - service: http_status:404

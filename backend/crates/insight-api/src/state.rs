@@ -40,8 +40,7 @@ impl std::fmt::Debug for ApiConfig {
     }
 }
 
-const DEFAULT_CORS_ORIGINS: &str =
-    "http://localhost:5173,http://localhost:1420,https://insightai.polytronx.com";
+const DEFAULT_CORS_ORIGINS: &str = "http://localhost:5173,http://localhost:1420,https://insight-app.polytronx.com,https://insightai.polytronx.com";
 
 impl ApiConfig {
     pub fn from_env() -> anyhow::Result<Self> {
