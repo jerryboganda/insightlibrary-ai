@@ -118,6 +118,72 @@ pub async fn rate_limit(State(state): State<AppState>, mut req: Request, next: N
     next.run(req).await
 }
 
+/// Path prefixes whose mutating requests are worth an audit-log entry.
+fn is_audited(path: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/api/admin",
+        "/api/org/settings",
+        "/api/users",
+        "/api/webhooks",
+        "/api/ai/",
+        "/api/ontologies",
+        "/api/evaluation/golden",
+        "/api/sources",
+        "/api/api-keys",
+    ];
+    PREFIXES.iter().any(|p| path.starts_with(p))
+}
+
+/// Record successful mutating requests to sensitive admin paths in
+/// `audit_logs`. Runs inside the rate-limit layer so the [`AuthedUser`]
+/// extension is already populated for authenticated callers.
+pub async fn audit(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let actor = req
+        .extensions()
+        .get::<AuthedUser>()
+        .map(|u| (u.tenant_id, u.user_id));
+
+    let response = next.run(req).await;
+
+    let mutating = matches!(
+        method,
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::PATCH
+            | axum::http::Method::DELETE
+    );
+    if mutating && response.status().is_success() && is_audited(&path) {
+        if let Some((tenant_id, user_id)) = actor {
+            let stores = state.stores.clone();
+            let action = format!("{method} {path}");
+            // Fire-and-forget: never let audit logging affect the response.
+            tokio::spawn(async move {
+                if let Ok(mut tx) = stores.pool.begin().await {
+                    if insight_core::storage::set_tenant(&mut tx, tenant_id)
+                        .await
+                        .is_ok()
+                    {
+                        let _ = sqlx::query(
+                            "INSERT INTO audit_logs (tenant_id, actor, action, target, severity) \
+                             VALUES ($1, $2, $3, $4, 'info')",
+                        )
+                        .bind(tenant_id)
+                        .bind(user_id.to_string())
+                        .bind(&action)
+                        .bind(&path)
+                        .execute(&mut *tx)
+                        .await;
+                        let _ = tx.commit().await;
+                    }
+                }
+            });
+        }
+    }
+    response
+}
+
 /// Per-IP limiter for the anonymous auth endpoints (sign-in/sign-up/
 /// refresh/sign-out) — applied BEFORE any credential or token work.
 pub async fn auth_rate_limit(State(state): State<AppState>, req: Request, next: Next) -> Response {

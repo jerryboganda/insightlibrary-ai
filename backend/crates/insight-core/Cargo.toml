@@ -25,3 +25,6 @@ reqwest = { workspace = true }
 base64 = "0.22"
 # Phase 8: envelope-encrypt BYO provider keys at rest (AES-256-GCM, KEK from env).
 aes-gcm = "0.10"
+# Phase 12: API-key hashing + webhook HMAC-SHA256 signatures.
+sha2 = "0.10"
+hmac = "0.12"

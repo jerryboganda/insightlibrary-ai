@@ -233,6 +233,60 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/ontology/expand", get(routes::ontology::expand))
         .route("/api/ontology/test", post(routes::ontology::test))
+        // Notifications.
+        .route(
+            "/api/notifications",
+            get(routes::notifications::list_notifications)
+                .post(routes::notifications::mark_all_read),
+        )
+        .route(
+            "/api/notifications/{id}",
+            axum::routing::patch(routes::notifications::update_notification),
+        )
+        .route(
+            "/api/notifications/{id}/archive",
+            post(routes::notifications::archive_notification),
+        )
+        // Webhooks.
+        .route(
+            "/api/webhooks",
+            get(routes::webhooks::list_webhooks).post(routes::webhooks::create_webhook),
+        )
+        .route(
+            "/api/webhooks/{id}",
+            axum::routing::patch(routes::webhooks::update_webhook)
+                .delete(routes::webhooks::delete_webhook),
+        )
+        .route(
+            "/api/webhooks/{id}/test",
+            post(routes::webhooks::test_webhook),
+        )
+        // Audit log.
+        .route("/api/audit", get(routes::audit::list_audit))
+        // Evaluation + golden set.
+        .route("/api/evaluation", get(routes::evaluation::get_evaluation))
+        .route(
+            "/api/evaluation/run",
+            post(routes::evaluation::run_evaluation),
+        )
+        .route(
+            "/api/evaluation/golden",
+            get(routes::evaluation::list_golden).post(routes::evaluation::create_golden),
+        )
+        .route(
+            "/api/evaluation/golden/{id}",
+            axum::routing::patch(routes::evaluation::update_golden)
+                .delete(routes::evaluation::delete_golden),
+        )
+        // Workspace API keys.
+        .route(
+            "/api/api-keys",
+            get(routes::api_keys::list_api_keys).post(routes::api_keys::create_api_key),
+        )
+        .route(
+            "/api/api-keys/{id}",
+            axum::routing::delete(routes::api_keys::delete_api_key),
+        )
         // Preferences (per-user).
         .route(
             "/api/preferences",
@@ -269,6 +323,12 @@ fn router(state: AppState) -> Router {
             post(routes::ai::save_key).delete(routes::ai::delete_key),
         )
         .route("/api/usage", get(routes::usage::get_usage))
+        // Audit layer is INNER to rate_limit so the AuthedUser extension it
+        // reads has already been populated.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::audit,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::rate_limit,

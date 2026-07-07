@@ -14,14 +14,17 @@ pub mod export;
 pub mod graph;
 pub mod ingest;
 pub mod llm;
+pub mod notify;
 pub mod ontology;
 pub mod retrieve;
+pub mod security;
 pub mod settings;
 pub mod storage;
 pub mod study;
 pub mod synth;
 pub mod tenancy;
 pub mod tutor;
+pub mod webhooks;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

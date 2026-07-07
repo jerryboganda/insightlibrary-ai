@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use insight_core::storage::{JobQueue, QueuedJob, StorageConfig, Stores};
-use insight_core::{claims, correlate, graph, ingest, synth};
+use insight_core::{claims, correlate, graph, ingest, synth, webhooks};
 use uuid::Uuid;
 
 const GROUP: &str = "workers";
@@ -57,6 +57,23 @@ async fn process(stores: &Stores, queue: &JobQueue, parser_url: &str, job: &Queu
         "correlate" => correlate::correlate(stores, job.tenant_id)
             .await
             .map(|_| ()),
+        // Deliver a domain event to all matching webhooks.
+        "webhook_deliver" => {
+            let event = job
+                .payload
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let data = job
+                .payload
+                .get("data")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            webhooks::dispatch(stores, job.tenant_id, &event, &data)
+                .await
+                .map(|_| ())
+        }
         other => Err(anyhow::anyhow!("unknown job kind {other}")),
     };
     if let Err(e) = &result {

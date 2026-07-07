@@ -136,6 +136,25 @@ pub async fn resolve_review(
     .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
     tx.commit().await.map_err(anyhow::Error::from)?;
 
+    // Emit a notification + fire webhooks (best-effort, non-blocking).
+    let _ = insight_core::notify::notify(
+        &state.stores,
+        user.tenant_id,
+        "ssot_merge",
+        "Review resolved",
+        &format!("A conflict was {}.", body.decision),
+        None,
+    )
+    .await;
+    let _ = state
+        .queue
+        .enqueue(
+            "webhook_deliver",
+            user.tenant_id,
+            &json!({ "event": "review.resolved", "data": { "reviewId": id, "decision": body.decision } }),
+        )
+        .await;
+
     let mut item = review_json(&row);
     item["resolution"] = json!({
         "resolved": true,
