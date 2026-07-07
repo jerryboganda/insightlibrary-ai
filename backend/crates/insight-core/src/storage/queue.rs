@@ -84,16 +84,23 @@ impl JobQueue {
         let mut conn = self.conn.clone();
         // Publish `queued` BEFORE the XADD: once the entry is on the stream a
         // fast worker can publish `running` immediately, and a late `queued`
-        // would make subscribers observe the status regress.
+        // would make subscribers observe the status regress. `stage` mirrors
+        // `status` for the processing SSE, which reads `stage`.
+        let event = serde_json::json!({
+            "type": "job", "id": job_id, "status": "queued", "stage": "queued",
+            "progress": 0, "message": null,
+        });
+        let payload_str = event.to_string();
         if let Some(user_id) = payload.get("userId").and_then(|v| v.as_str()) {
-            let event = serde_json::json!({
-                "type": "job", "id": job_id, "status": "queued", "progress": 0,
-            });
             let _: () = conn
-                .publish(format!("user:{user_id}"), event.to_string())
+                .publish(format!("user:{user_id}"), &payload_str)
                 .await
                 .context("publish queued event")?;
         }
+        let _: () = conn
+            .publish(format!("tenant:{tenant_id}:jobs"), &payload_str)
+            .await
+            .context("publish queued tenant event")?;
 
         let _: String = conn
             .xadd_maxlen(
@@ -187,6 +194,20 @@ impl JobQueue {
         Ok(())
     }
 
+    /// `true` when the job was externally cancelled (status set to
+    /// `cancelled`). The ingest pipeline polls this between stages to abort.
+    pub async fn is_cancelled(&self, tenant_id: Uuid, job_id: Uuid) -> anyhow::Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, tenant_id).await?;
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("read job status")?;
+        tx.commit().await?;
+        Ok(status.as_deref() == Some("cancelled"))
+    }
+
     /// Update the `jobs` row (tenant-scoped tx) and publish a progress event
     /// on `user:{user_id}` for the WebSocket fan-out.
     pub async fn publish_progress(
@@ -213,16 +234,24 @@ impl JobQueue {
         .context("update job progress")?;
         tx.commit().await?;
 
+        let event = serde_json::json!({
+            "type": "job", "id": job_id, "status": status, "stage": status,
+            "progress": progress, "message": error,
+        });
+        let payload = event.to_string();
+        let mut conn = self.conn.clone();
+        // Per-user channel (WebSocket fan-out to the uploader).
         if let Some(user_id) = user_id {
-            let event = serde_json::json!({
-                "type": "job", "id": job_id, "status": status, "progress": progress,
-            });
-            let mut conn = self.conn.clone();
             let _: () = conn
-                .publish(format!("user:{user_id}"), event.to_string())
+                .publish(format!("user:{user_id}"), &payload)
                 .await
                 .context("publish progress event")?;
         }
+        // Tenant-wide jobs channel (admin processing SSE sees every job).
+        let _: () = conn
+            .publish(format!("tenant:{tenant_id}:jobs"), &payload)
+            .await
+            .context("publish tenant progress event")?;
         Ok(())
     }
 }

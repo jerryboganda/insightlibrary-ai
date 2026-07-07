@@ -523,6 +523,10 @@ async fn stage(
     job_id: Uuid,
     s: Stage,
 ) -> anyhow::Result<()> {
+    // Abort the pipeline promptly if the job was cancelled between stages.
+    if queue.is_cancelled(tenant_id, job_id).await.unwrap_or(false) {
+        anyhow::bail!("ingest cancelled by user");
+    }
     queue
         .publish_progress(tenant_id, ctx.user_id, job_id, s.status, s.progress, None)
         .await

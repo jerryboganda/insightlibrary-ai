@@ -116,7 +116,7 @@ fn doc_type(title: &str, storage_key: &str) -> &'static str {
 /// persisted page count (from `SELECT count(*) FROM pages`); pass `0` only when
 /// the count is genuinely unknown/not applicable (e.g. list rows where the
 /// per-doc count is not fetched).
-fn document_json(row: &DocumentRow, pages: i64) -> Value {
+pub(crate) fn document_json(row: &DocumentRow, pages: i64) -> Value {
     let status = if row.status == "pending" {
         "processing"
     } else {
@@ -404,4 +404,191 @@ pub async fn get_document(
         .ok_or_else(|| ApiError::not_found("document not found"))?;
     let pages = page_count(&state, user.tenant_id, id).await?;
     Ok(Json(document_json(&row, pages)))
+}
+
+const DOWNLOAD_TTL: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Deserialize)]
+pub struct DownloadQuery {
+    format: Option<String>,
+}
+
+/// `GET /api/documents/{id}/download` — 302 to a presigned S3 GET by default;
+/// `?format=json` returns `{ url, expiresIn }`.
+pub async fn download_document(
+    user: AuthedUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<DownloadQuery>,
+) -> Result<Response, ApiError> {
+    let row = state
+        .stores
+        .docs
+        .get_document(user.tenant_id, id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("document not found"))?;
+    if row.storage_key.is_empty() {
+        return Err(ApiError::not_found(
+            "no source file stored for this document",
+        ));
+    }
+    let url = state
+        .stores
+        .blobs
+        .presign_get(
+            &state.stores.config.buckets.documents,
+            &row.storage_key,
+            DOWNLOAD_TTL,
+        )
+        .await?;
+
+    if q.format.as_deref() == Some("json") {
+        return Ok(Json(json!({ "url": url, "expiresIn": 900 })).into_response());
+    }
+    Ok((StatusCode::FOUND, [("location", url)]).into_response())
+}
+
+/// `GET /api/documents/{id}/structure` — parsed-structure summary.
+pub async fn document_structure(
+    user: AuthedUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let doc = state
+        .stores
+        .docs
+        .get_document(user.tenant_id, id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("document not found"))?;
+
+    let mut tx = state
+        .stores
+        .pool
+        .begin()
+        .await
+        .map_err(anyhow::Error::from)?;
+    set_tenant(&mut tx, user.tenant_id).await?;
+
+    // pages: count + first-page dims.
+    let page: Option<(i64, Option<f32>, Option<f32>)> = sqlx::query_as(
+        "SELECT count(*), \
+                (array_agg(width ORDER BY page_no))[1], \
+                (array_agg(height ORDER BY page_no))[1] \
+         FROM pages WHERE document_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+
+    // blocks: total + by kind.
+    let block_kinds: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT b.kind, count(*) FROM blocks b \
+         JOIN pages p ON p.id = b.page_id \
+         WHERE p.document_id = $1 GROUP BY b.kind",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+
+    // block coverage by status.
+    let block_status: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT b.status, count(*) FROM blocks b \
+         JOIN pages p ON p.id = b.page_id \
+         WHERE p.document_id = $1 GROUP BY b.status",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+
+    // chunk count for this document (via block -> page).
+    let (chunks,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM chunks c \
+         JOIN blocks b ON b.id = c.block_id \
+         JOIN pages p ON p.id = b.page_id \
+         WHERE p.document_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+
+    // latest ingest job for this document.
+    #[derive(sqlx::FromRow)]
+    struct JobRow {
+        id: Uuid,
+        status: String,
+        progress: i32,
+        last_error: Option<String>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    }
+    let job: Option<JobRow> = sqlx::query_as(
+        "SELECT id, status, progress, last_error, updated_at FROM jobs \
+         WHERE payload_json->>'documentId' = $1 ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(id.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+    tx.commit().await.map_err(anyhow::Error::from)?;
+
+    let (page_count, width, height) = page.unwrap_or((0, None, None));
+    let by_kind: serde_json::Map<String, Value> = block_kinds
+        .iter()
+        .map(|(k, n)| (k.clone(), json!(n)))
+        .collect();
+    let block_total: i64 = block_kinds.iter().map(|(_, n)| n).sum();
+    let by_status: serde_json::Map<String, Value> = block_status
+        .iter()
+        .map(|(s, n)| (s.clone(), json!(n)))
+        .collect();
+    let cov_total: i64 = block_status.iter().map(|(_, n)| n).sum();
+    let pct = |n: i64| -> f64 {
+        if cov_total > 0 {
+            ((n as f64 / cov_total as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        }
+    };
+    let get = |name: &str| {
+        block_status
+            .iter()
+            .find(|(s, _)| s == name)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    };
+    let chunked_pct = if cov_total > 0 {
+        (chunks as f64 / cov_total as f64 * 1000.0).round() / 10.0
+    } else {
+        0.0
+    };
+
+    let job_json = job.map(|j| {
+        json!({
+            "id": j.id,
+            "stage": j.status,
+            "progress": j.progress,
+            "message": j.last_error,
+            "startedAt": j.updated_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "stages": Value::Null,
+        })
+    });
+
+    Ok(Json(json!({
+        "source": "postgres",
+        "hasSource": !doc.storage_key.is_empty(),
+        "pages": { "count": page_count, "width": width, "height": height },
+        "blocks": { "total": block_total, "byKind": by_kind },
+        "coverage": {
+            "total": cov_total,
+            "byStatus": by_status,
+            "unaccountedPct": pct(get("pending")),
+            "chunkedPct": chunked_pct,
+            "claimedPct": pct(get("claimed")),
+        },
+        "chunks": chunks,
+        "job": job_json,
+    })))
 }

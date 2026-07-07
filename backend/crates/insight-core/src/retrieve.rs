@@ -422,6 +422,50 @@ async fn cache_hits(stores: &Stores, cache_key: &str, hits: &[SearchHit]) {
     }
 }
 
+/// Re-embed up to `limit` unembedded chunks for a tenant (admin reindex).
+/// Returns `(reembedded, more_remaining)`. A full batch implies more work.
+pub async fn reindex_unembedded(
+    stores: &Stores,
+    tenant_id: Uuid,
+    limit: i64,
+) -> anyhow::Result<(usize, bool)> {
+    let mut tx = stores.pool.begin().await?;
+    set_tenant(&mut tx, tenant_id).await?;
+    let rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, text FROM chunks WHERE NOT embedded LIMIT $1")
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await
+            .context("select unembedded chunks")?;
+    tx.commit().await?;
+    if rows.is_empty() {
+        return Ok((0, false));
+    }
+    let full_batch = rows.len() as i64 == limit;
+
+    let texts: Vec<String> = rows.iter().map(|r| r.1.clone()).collect();
+    let vectors = embed_dense(&texts, false)
+        .await
+        .context("embedding reindex batch")?;
+    anyhow::ensure!(vectors.len() == rows.len(), "reindex embed count mismatch");
+
+    let mut tx = stores.pool.begin().await?;
+    set_tenant(&mut tx, tenant_id).await?;
+    let mut n = 0usize;
+    for ((id, _), vec) in rows.iter().zip(vectors) {
+        let vector = pgvector::Vector::from(vec);
+        sqlx::query("UPDATE chunks SET vector = $2, embedded = true WHERE id = $1")
+            .bind(id)
+            .bind(vector)
+            .execute(&mut *tx)
+            .await
+            .context("update reindexed chunk")?;
+        n += 1;
+    }
+    tx.commit().await?;
+    Ok((n, full_batch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

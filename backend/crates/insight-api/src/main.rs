@@ -5,6 +5,7 @@ mod auth;
 mod error;
 mod middleware;
 mod routes;
+mod sse;
 mod state;
 mod ws;
 
@@ -87,10 +88,57 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/documents/{id}", get(routes::documents::get_document))
         .route(
+            "/api/documents/{id}/download",
+            get(routes::documents::download_document),
+        )
+        .route(
+            "/api/documents/{id}/structure",
+            get(routes::documents::document_structure),
+        )
+        .route(
             "/api/search",
             get(routes::search::search_get).post(routes::search::search_post),
         )
         .route("/api/jobs/{id}", get(routes::jobs::get_job))
+        // Library: folders + sources + figures.
+        .route(
+            "/api/folders",
+            get(routes::folders::list_folders).post(routes::folders::create_folder),
+        )
+        .route("/api/folders/{id}", get(routes::folders::get_folder))
+        .route(
+            "/api/sources",
+            get(routes::sources::list_sources).post(routes::sources::create_source),
+        )
+        .route(
+            "/api/sources/{id}",
+            axum::routing::patch(routes::sources::update_source),
+        )
+        .route("/api/figures", get(routes::figures::search_figures))
+        // Processing pipeline monitor.
+        .route("/api/processing", get(routes::processing::list_processing))
+        .route(
+            "/api/processing/stats",
+            get(routes::processing::processing_stats),
+        )
+        .route(
+            "/api/processing/stream",
+            get(routes::processing::processing_stream),
+        )
+        .route(
+            "/api/processing/{id}/cancel",
+            post(routes::processing::cancel_job),
+        )
+        .route(
+            "/api/processing/{id}/retry",
+            post(routes::processing::retry_job),
+        )
+        // Admin ops.
+        .route("/api/admin/reindex", post(routes::admin::reindex))
+        .route(
+            "/api/admin/storage-stats",
+            get(routes::admin::storage_stats),
+        )
         // Preferences (per-user).
         .route(
             "/api/preferences",
