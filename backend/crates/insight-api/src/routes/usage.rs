@@ -60,12 +60,14 @@ pub async fn get_usage(
     } else {
         ""
     };
+    // SUM over bigint returns NUMERIC in Postgres — cast back to bigint so it
+    // decodes into i64.
     let sql = format!(
         "SELECT meta->>'provider' AS provider, meta->>'model' AS model, \
                 count(*) AS calls, \
-                COALESCE(SUM((meta->>'inTokens')::bigint), 0) AS tokens_in, \
-                COALESCE(SUM((meta->>'outTokens')::bigint), 0) AS tokens_out, \
-                COALESCE(SUM(quantity), 0) AS cost_micro \
+                COALESCE(SUM((meta->>'inTokens')::bigint), 0)::bigint AS tokens_in, \
+                COALESCE(SUM((meta->>'outTokens')::bigint), 0)::bigint AS tokens_out, \
+                COALESCE(SUM(quantity), 0)::bigint AS cost_micro \
          FROM usage_records WHERE metric = 'llm' {filter} \
          GROUP BY 1, 2 ORDER BY cost_micro DESC"
     );
@@ -76,7 +78,7 @@ pub async fn get_usage(
 
     // Month spend (always month, for the budget block).
     let (month_micro,): (Option<i64>,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(quantity), 0) FROM usage_records \
+        "SELECT COALESCE(SUM(quantity), 0)::bigint FROM usage_records \
          WHERE metric = 'llm' AND ts >= date_trunc('month', now())",
     )
     .fetch_one(&mut *tx)

@@ -838,7 +838,7 @@ pub async fn month_to_date_usd(stores: &Stores, tenant_id: Uuid) -> anyhow::Resu
     let mut tx = stores.pool.begin().await?;
     set_tenant(&mut tx, tenant_id).await?;
     let row: (Option<i64>,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(quantity), 0) FROM usage_records \
+        "SELECT COALESCE(SUM(quantity), 0)::bigint FROM usage_records \
          WHERE metric = 'llm' AND ts >= date_trunc('month', now())",
     )
     .fetch_one(&mut *tx)
