@@ -1,0 +1,72 @@
+{
+  "graphs": [
+    {
+      "id": "http://purl.obolibrary.org/obo/mondo.owl",
+      "nodes": [
+        {
+          "id": "http://purl.obolibrary.org/obo/MONDO_0008170",
+          "lbl": "Addison disease",
+          "type": "CLASS",
+          "meta": {
+            "definition": {
+              "val": "A primary adrenal insufficiency caused by destruction or dysfunction of the adrenal cortex, leading to deficient cortisol and often aldosterone."
+            },
+            "synonyms": [
+              { "pred": "hasExactSynonym", "val": "Addison's disease" },
+              { "pred": "hasExactSynonym", "val": "primary adrenal insufficiency" },
+              { "pred": "hasRelatedSynonym", "val": "adrenal insufficiency" },
+              { "pred": "hasExactSynonym", "val": "chronic adrenocortical insufficiency" }
+            ]
+          }
+        },
+        {
+          "id": "http://purl.obolibrary.org/obo/MONDO_0015917",
+          "lbl": "adrenal cortical hypofunction",
+          "type": "CLASS",
+          "meta": {
+            "synonyms": [
+              { "pred": "hasExactSynonym", "val": "adrenocortical insufficiency" }
+            ]
+          }
+        },
+        {
+          "id": "http://purl.obolibrary.org/obo/MONDO_0005151",
+          "lbl": "adrenal gland disease",
+          "type": "CLASS",
+          "meta": {
+            "synonyms": [
+              { "pred": "hasExactSynonym", "val": "disorder of adrenal gland" }
+            ]
+          }
+        },
+        {
+          "id": "http://purl.obolibrary.org/obo/MONDO_0005066",
+          "lbl": "metabolic disease",
+          "type": "CLASS",
+          "meta": {
+            "synonyms": [
+              { "pred": "hasExactSynonym", "val": "metabolic disorder" }
+            ]
+          }
+        }
+      ],
+      "edges": [
+        {
+          "sub": "http://purl.obolibrary.org/obo/MONDO_0008170",
+          "pred": "is_a",
+          "obj": "http://purl.obolibrary.org/obo/MONDO_0015917"
+        },
+        {
+          "sub": "http://purl.obolibrary.org/obo/MONDO_0015917",
+          "pred": "is_a",
+          "obj": "http://purl.obolibrary.org/obo/MONDO_0005151"
+        },
+        {
+          "sub": "http://purl.obolibrary.org/obo/MONDO_0005151",
+          "pred": "is_a",
+          "obj": "http://purl.obolibrary.org/obo/MONDO_0005066"
+        }
+      ]
+    }
+  ]
+}
