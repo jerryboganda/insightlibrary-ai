@@ -1,4 +1,17 @@
+# inference-svc dependencies (Phase 5). CPU/ONNX only — deliberately NO torch.
+#
+# fastembed pulls onnxruntime (CPU), tokenizers, huggingface_hub and numpy.
+# It provides dense embeddings (TextEmbedding), sparse SPLADE embeddings
+# (SparseTextEmbedding), and cross-encoder rerank (TextCrossEncoder), all as
+# quantized ONNX models — no PyTorch, keeping the image small on the RAM/disk-
+# tight shared VPS.
+#
+# faster-whisper (STT) is intentionally OMITTED: it and its model weights are
+# heavy, and /transcribe is a 501 stub in Phase 5. A later phase adds it.
 fastapi>=0.115
 uvicorn[standard]>=0.34
-# Phase 5 adds: fastembed (ONNX dense/sparse/rerank, CPU) + faster-whisper.
-# Deliberately no PyTorch — the shared VPS is RAM/disk-tight.
+pydantic>=2
+
+# fastembed 0.4+ ships TextCrossEncoder (the rerank cross-encoder) and the
+# SPLADE sparse models; pin the floor accordingly.
+fastembed>=0.4,<0.7

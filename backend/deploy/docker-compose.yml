@@ -136,10 +136,27 @@ services:
   inference-svc:
     image: ghcr.io/jerryboganda/insight-inference-svc:${IMAGE_TAG:-latest}
     build: ../services/inference-svc
+    # NOTE: fastembed models are BAKED into the image under /opt/models
+    # (see the Dockerfile), which is deliberately OUTSIDE this /models mount —
+    # mounting an empty volume over the baked path would force a runtime
+    # download on the RAM-tight box. The /models volume is kept only for any
+    # future runtime-written cache and stays disjoint from the baked path.
     volumes:
       - modelcache:/models
+    environment:
+      # Kept in lockstep with the models baked at build time. Overriding these
+      # WITHOUT rebaking would trigger a runtime download of the new model.
+      INFER_DENSE_MODEL: ${INFER_DENSE_MODEL:-BAAI/bge-base-en-v1.5}
+      INFER_SPARSE_MODEL: ${INFER_SPARSE_MODEL:-prithivida/Splade_PP_en_v1}
+      INFER_RERANK_MODEL: ${INFER_RERANK_MODEL:-Xenova/ms-marco-MiniLM-L-6-v2}
+      INFER_MAX_BATCH: ${INFER_MAX_BATCH:-32}
     networks: [insight]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   insight-api:
     image: ghcr.io/jerryboganda/insight-api:${IMAGE_TAG:-latest}

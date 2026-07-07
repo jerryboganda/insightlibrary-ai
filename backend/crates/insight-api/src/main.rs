@@ -76,6 +76,10 @@ fn router(state: AppState) -> Router {
             post(routes::documents::create_document).get(routes::documents::list_documents),
         )
         .route("/api/documents/{id}", get(routes::documents::get_document))
+        .route(
+            "/api/search",
+            get(routes::search::search_get).post(routes::search::search_post),
+        )
         .route("/api/jobs/{id}", get(routes::jobs::get_job))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

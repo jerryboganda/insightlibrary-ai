@@ -18,7 +18,8 @@ wherever practical so the existing Svelte 5 UI can be rewired with minimal churn
 - **Copilot/tutor streaming**: `POST /api/copilot` responds with an SSE stream of
   `CopilotChunk` frames `{ type: start|text|context|meta|end, content?, meta? }`,
   modes: ask | strict_citation | research | compare | ssot | delta.
-- **Search**: `GET /api/search?q=` → `{ results: [{kind: claim|chunk|topic, id, title?, snippet, href, confidence}], total, took_ms }`.
+- **Search**: `GET /api/search?q=` → `{ results: [{kind: claim|chunk|topic, id, title?, snippet, href, confidence}], total, tookMs }`
+  (camelCase, matching the rest of the surface — `contentType`/`folderId`/`lastUpdated`; the impl emits `tookMs`).
 - **Embeddings**: existing vectors are **768-dim** (gemini-embedding-001) — the new chunks
   table is vector(768); keep dimension parity.
 - **AI providers**: org/user BYO keys with `{ provider, key, scope: org|user }` shape;

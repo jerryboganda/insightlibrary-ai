@@ -42,4 +42,6 @@ COPY --from=builder /app/target/release/insight-selftest /usr/local/bin/insight-
 COPY --from=builder /app/target/release/insight-apitest /usr/local/bin/insight-apitest
 # Ingest acceptance test (run manually: docker compose ... run --rm insight-worker insight-ingest-test)
 COPY --from=builder /app/target/release/insight-ingest-test /usr/local/bin/insight-ingest-test
+# Search acceptance test (run manually: docker compose ... run --rm insight-worker insight-search-test)
+COPY --from=builder /app/target/release/insight-search-test /usr/local/bin/insight-search-test
 ENTRYPOINT ["insight-worker"]

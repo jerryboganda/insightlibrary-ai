@@ -62,6 +62,17 @@ struct KnnRow {
     distance: f64,
 }
 
+/// Raw FTS row (`ts_rank` relevance, higher is better) from Postgres.
+#[derive(sqlx::FromRow)]
+struct FtsRow {
+    id: Uuid,
+    text: String,
+    contextual_prefix: Option<String>,
+    block_id: Option<Uuid>,
+    topic: Option<String>,
+    rank: f64,
+}
+
 /// Embedding persistence + similarity search. Native async-fn-in-trait.
 #[allow(async_fn_in_trait)]
 pub trait VectorStore {
@@ -74,6 +85,17 @@ pub trait VectorStore {
         &self,
         tenant_id: Uuid,
         query_vec: &[f32],
+        k: i64,
+        filter: Option<&ChunkFilter>,
+    ) -> anyhow::Result<Vec<ChunkHit>>;
+    /// Postgres full-text-search candidates over `chunks.fts`
+    /// (`websearch_to_tsquery`), tenant-scoped; `score` is `ts_rank`. The
+    /// local, key-free lexical leg of hybrid retrieval, fused with `knn_search`
+    /// by RRF in [`crate::retrieve`].
+    async fn fts_search(
+        &self,
+        tenant_id: Uuid,
+        query: &str,
         k: i64,
         filter: Option<&ChunkFilter>,
     ) -> anyhow::Result<Vec<ChunkHit>>;
@@ -251,6 +273,58 @@ impl VectorStore for PgVectorStore {
                 block_id: row.block_id,
                 topic: row.topic,
                 score: 1.0 - row.distance,
+            })
+            .collect())
+    }
+
+    async fn fts_search(
+        &self,
+        tenant_id: Uuid,
+        query: &str,
+        k: i64,
+        filter: Option<&ChunkFilter>,
+    ) -> anyhow::Result<Vec<ChunkHit>> {
+        let (source_type, topic) = match filter {
+            Some(f) => (f.source_type.clone(), f.topic.clone()),
+            None => (None, None),
+        };
+
+        let mut tx = self.pool.begin().await?;
+        set_tenant(&mut tx, tenant_id).await?;
+
+        // websearch_to_tsquery parses user-friendly query syntax (quoted
+        // phrases, OR, -exclusion) safely — it never errors on arbitrary
+        // input, so no query pre-sanitization is needed. The @@ match uses the
+        // GIN index on chunks.fts; ts_rank scores the surviving rows. RLS
+        // scopes to the tenant; $2/$3 are always-bound optional filters.
+        let rows: Vec<FtsRow> = sqlx::query_as(
+            "SELECT id, text, contextual_prefix, block_id, topic, \
+                    ts_rank(fts, websearch_to_tsquery('english', $1))::float8 AS rank \
+             FROM chunks \
+             WHERE fts @@ websearch_to_tsquery('english', $1) \
+               AND ($2::text IS NULL OR source_type = $2) \
+               AND ($3::text IS NULL OR topic = $3) \
+             ORDER BY rank DESC \
+             LIMIT $4",
+        )
+        .bind(query)
+        .bind(source_type)
+        .bind(topic)
+        .bind(k)
+        .fetch_all(&mut *tx)
+        .await
+        .context("fts search")?;
+        tx.commit().await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| ChunkHit {
+                id: row.id,
+                text: row.text,
+                contextual_prefix: row.contextual_prefix,
+                block_id: row.block_id,
+                topic: row.topic,
+                score: row.rank,
             })
             .collect())
     }

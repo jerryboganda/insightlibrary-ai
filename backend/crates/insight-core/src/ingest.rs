@@ -19,12 +19,27 @@ use base64::Engine;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::retrieve;
 use crate::storage::queue::JobQueue;
 use crate::storage::{set_tenant, BlobStore, QueuedJob, Stores};
 
 /// Chunking defaults (match the reference pipeline).
 const CHUNK_TARGET_CHARS: usize = 800;
 const CHUNK_OVERLAP_CHARS: usize = 120;
+
+/// Max chunks embedded per inference-svc batch (mirrors the service's
+/// INFER_MAX_BATCH default; keeps request bodies + peak RAM bounded).
+const EMBED_BATCH: usize = 32;
+
+/// SPLADE (`prithivida/Splade_PP_en_v1`) emits indices over the BERT vocab
+/// (30522 terms). pgvector `sparsevec` is 1-indexed, so we shift indices by +1
+/// and declare this dimension. Kept in sync with the sparse model.
+const SPARSE_DIM: usize = 30522;
+
+/// Cap on how many chunks get an LLM-generated contextual prefix per document
+/// (matches CONTEXTUAL_MAX_CHUNKS in the reference pipeline) so a huge document
+/// can't run up an unbounded paid-API bill.
+const CONTEXTUAL_MAX_CHUNKS: usize = 150;
 
 /// Default confidence floor below which a block is `low_confidence`.
 const DEFAULT_LOW_CONF_THRESHOLD: f32 = 0.4;
@@ -284,14 +299,32 @@ async fn ingest_inner(
     )
     .await?;
 
-    // 6. contextualize(60) + embed(85): no-ops in Phase 4. Chunks were written
-    //    with vector NULL / embedded = false; Phase 5 backfills them.
+    // 6. contextualize(60) + embed(85): Phase 5 fills embeddings. The chunks
+    //    were written with vector NULL / embedded = false; here we backfill
+    //    dense (+ sparse) vectors via inference-svc, and — only if an LLM key
+    //    is configured — a per-chunk contextual prefix. Embedding is
+    //    resilient: a failure flags the document needs_review but never crashes
+    //    the worker (the chunks simply stay unembedded for a later backfill).
     stage(queue, tenant_id, ctx, job.id, S_CONTEXTUALIZE).await?;
+    let embed_ok = match embed_document(stores, tenant_id, ctx.document_id).await {
+        Ok(embedded) => {
+            tracing::info!(document = %ctx.document_id, embedded, "embed stage complete");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                document = %ctx.document_id,
+                error = format!("{e:#}"),
+                "embed stage failed; document will need review and a later backfill"
+            );
+            false
+        }
+    };
     stage(queue, tenant_id, ctx, job.id, S_EMBED).await?;
 
     // 7. index(95): flip the document status.
     stage(queue, tenant_id, ctx, job.id, S_INDEX).await?;
-    let final_status = if outcome.needs_review {
+    let final_status = if outcome.needs_review || !embed_ok {
         "needs_review"
     } else {
         "indexed"
@@ -320,6 +353,167 @@ async fn ingest_inner(
     // 8. done(100).
     stage(queue, tenant_id, ctx, job.id, S_DONE).await?;
     Ok(())
+}
+
+/// One unembedded chunk pulled for the embed backfill.
+struct UnembeddedChunk {
+    id: Uuid,
+    text: String,
+}
+
+/// Format a SPLADE sparse vector as a pgvector `sparsevec` text literal:
+/// `{i1:v1,i2:v2,...}/dim`. Indices are shifted +1 (SPLADE is 0-indexed;
+/// sparsevec is 1-indexed) and MUST be strictly increasing and <= dim. Out-of-
+/// range or zero-weight terms are dropped defensively. Returns `None` when
+/// nothing usable remains (the chunk then gets a NULL sparse column).
+fn sparsevec_literal(sv: &retrieve::SparseVector, dim: usize) -> Option<String> {
+    let mut pairs: Vec<(usize, f32)> = sv
+        .indices
+        .iter()
+        .zip(sv.values.iter())
+        .filter_map(|(&i, &v)| {
+            if i < 0 || v == 0.0 || !v.is_finite() {
+                return None;
+            }
+            let idx = (i as usize) + 1; // 0-indexed SPLADE -> 1-indexed sparsevec
+            (idx <= dim).then_some((idx, v))
+        })
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    pairs.sort_by_key(|(idx, _)| *idx);
+    pairs.dedup_by_key(|(idx, _)| *idx);
+    let body = pairs
+        .iter()
+        .map(|(idx, v)| format!("{idx}:{v}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(format!("{{{body}}}/{dim}"))
+}
+
+/// Backfill dense (+ sparse) embeddings for a document's unembedded chunks, and
+/// — only when an LLM key is configured — a per-chunk contextual prefix.
+///
+/// Resilient by construction: dense embedding is required (a document with no
+/// dense vectors is not searchable), but sparse and contextual prefixes are
+/// best-effort. Returns the number of chunks marked `embedded = true`. Fully
+/// tenant-scoped. The caller treats an `Err` as "needs review", never a crash.
+async fn embed_document(
+    stores: &Stores,
+    tenant_id: Uuid,
+    document_id: Uuid,
+) -> anyhow::Result<usize> {
+    // Pull the unembedded chunks for THIS document (tenant-scoped) with their
+    // originating document title for the contextual-prefix prompt.
+    let (title, chunks): (String, Vec<UnembeddedChunk>) = {
+        let mut tx = stores.pool.begin().await?;
+        set_tenant(&mut tx, tenant_id).await?;
+        let title: String = sqlx::query_scalar("SELECT title FROM documents WHERE id = $1")
+            .bind(document_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("load document title for embed")?
+            .unwrap_or_default();
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT c.id, c.text FROM chunks c \
+             JOIN blocks b ON b.id = c.block_id \
+             JOIN pages p ON p.id = b.page_id \
+             WHERE p.document_id = $1 AND NOT c.embedded",
+        )
+        .bind(document_id)
+        .fetch_all(&mut *tx)
+        .await
+        .context("fetch unembedded chunks")?;
+        tx.commit().await?;
+        (
+            title,
+            rows.into_iter()
+                .map(|(id, text)| UnembeddedChunk { id, text })
+                .collect(),
+        )
+    };
+
+    if chunks.is_empty() {
+        return Ok(0);
+    }
+
+    // Whether to attempt contextual prefixes at all (no key -> skip entirely).
+    let llm_available = crate::llm::provider_from_env().is_some();
+
+    let mut embedded = 0usize;
+    let mut contextualized = 0usize;
+    for (batch_no, batch) in chunks.chunks(EMBED_BATCH).enumerate() {
+        let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
+
+        // Dense is required.
+        let dense = retrieve::embed_dense(&texts, false)
+            .await
+            .context("dense embedding batch")?;
+        anyhow::ensure!(
+            dense.len() == batch.len(),
+            "dense batch size mismatch: got {}, expected {}",
+            dense.len(),
+            batch.len()
+        );
+
+        // Sparse is best-effort: on failure, every chunk in the batch gets a
+        // NULL sparse column (dense-only retrieval still works).
+        let sparse = retrieve::embed_sparse(&texts).await.unwrap_or_else(|e| {
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "sparse embedding batch failed; dense-only"
+            );
+            Vec::new()
+        });
+
+        let mut tx = stores.pool.begin().await?;
+        set_tenant(&mut tx, tenant_id).await?;
+        for (i, chunk) in batch.iter().enumerate() {
+            let vector = pgvector::Vector::from(dense[i].clone());
+            let sparse_literal = sparse
+                .get(i)
+                .and_then(|sv| sparsevec_literal(sv, SPARSE_DIM));
+
+            // Contextual prefix only when a key is configured and we're under
+            // the per-document cap. Best-effort: a failure leaves prefix NULL.
+            let prefix = if llm_available && contextualized < CONTEXTUAL_MAX_CHUNKS {
+                match crate::llm::contextual_prefix(&title, &chunk.text).await {
+                    Ok(Some(p)) => {
+                        contextualized += 1;
+                        Some(p)
+                    }
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(error = format!("{e:#}"), "contextual prefix failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Bind sparse as a text literal cast to sparsevec (pgvector has no
+            // sqlx encoder for sparsevec here); NULL when absent.
+            sqlx::query(
+                "UPDATE chunks SET vector = $2, sparse = $3::sparsevec, \
+                 contextual_prefix = COALESCE($4, contextual_prefix), embedded = true \
+                 WHERE id = $1",
+            )
+            .bind(chunk.id)
+            .bind(vector)
+            .bind(sparse_literal)
+            .bind(prefix)
+            .execute(&mut *tx)
+            .await
+            .context("update chunk embedding")?;
+            embedded += 1;
+        }
+        tx.commit().await?;
+        tracing::debug!(document = %document_id, batch = batch_no, "embedded chunk batch");
+    }
+
+    Ok(embedded)
 }
 
 async fn stage(
