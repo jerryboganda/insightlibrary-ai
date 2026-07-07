@@ -6,11 +6,32 @@
 
 use std::time::Duration;
 
-use insight_core::ingest;
 use insight_core::storage::{JobQueue, QueuedJob, StorageConfig, Stores};
+use insight_core::{claims, correlate, graph, ingest, synth};
 use uuid::Uuid;
 
 const GROUP: &str = "workers";
+
+/// Run the full knowledge pipeline for a freshly-ingested document:
+/// extract claims → correlate (dedup/conflict) → rebuild graph → compile topics.
+/// Each step degrades gracefully (no-op without an LLM provider).
+async fn run_knowledge(stores: &Stores, job: &QueuedJob) -> anyhow::Result<()> {
+    let tenant_id = job.tenant_id;
+    if let Some(doc) = job
+        .payload
+        .get("documentId")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<Uuid>().ok())
+    {
+        let n = claims::extract_claims(stores, tenant_id, doc).await?;
+        tracing::info!(tenant = %tenant_id, document = %doc, claims = n, "claims extracted");
+    }
+    correlate::correlate(stores, tenant_id).await?;
+    graph::build_graph(stores, tenant_id).await?;
+    let topics = synth::compile_topics(stores, tenant_id).await?;
+    tracing::info!(tenant = %tenant_id, topics, "topics compiled");
+    Ok(())
+}
 
 /// A pending entry idle this long is considered abandoned (its worker
 /// crashed/was killed before XACK) and is reclaimed via XAUTOCLAIM.
@@ -26,6 +47,16 @@ async fn process(stores: &Stores, queue: &JobQueue, parser_url: &str, job: &Queu
         // run_ingest already flips the document to `failed` and publishes a
         // `failed` event on its own error path.
         "ingest" => ingest::run_ingest(stores, queue, parser_url, job).await,
+        // Knowledge plane (auto-chained after ingest when autoSsotTopics, or
+        // enqueued on demand).
+        "knowledge_build" => run_knowledge(stores, job).await,
+        "topic_compile" => synth::compile_topics(stores, job.tenant_id)
+            .await
+            .map(|_| ()),
+        "graph_build" => graph::build_graph(stores, job.tenant_id).await.map(|_| ()),
+        "correlate" => correlate::correlate(stores, job.tenant_id)
+            .await
+            .map(|_| ()),
         other => Err(anyhow::anyhow!("unknown job kind {other}")),
     };
     if let Err(e) = &result {

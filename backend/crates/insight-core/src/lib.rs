@@ -6,7 +6,9 @@
 
 pub mod analytics;
 pub mod billing;
+pub mod claims;
 pub mod collab;
+pub mod correlate;
 pub mod eval;
 pub mod export;
 pub mod graph;

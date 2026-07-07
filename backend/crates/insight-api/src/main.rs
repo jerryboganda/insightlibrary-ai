@@ -139,6 +139,49 @@ fn router(state: AppState) -> Router {
             "/api/admin/storage-stats",
             get(routes::admin::storage_stats),
         )
+        // Topics / SSOT.
+        .route("/api/topics", get(routes::topics::list_topics))
+        .route("/api/topics/{id}", get(routes::topics::get_topic))
+        .route(
+            "/api/topics/{id}/claims",
+            get(routes::topics::get_topic_claims).post(routes::topics::add_claim),
+        )
+        .route(
+            "/api/topics/{id}/verify",
+            post(routes::topics::verify_topic),
+        )
+        .route(
+            "/api/topics/{id}/regenerate",
+            post(routes::topics::regenerate_topic),
+        )
+        .route(
+            "/api/topics/{id}/versions",
+            get(routes::topics::list_versions),
+        )
+        .route(
+            "/api/topics/{id}/versions/{version}/restore",
+            post(routes::topics::restore_version),
+        )
+        .route("/api/topics/{id}/case", post(routes::topics::generate_case))
+        .route(
+            "/api/topics/{id}/flashcards",
+            post(routes::topics::generate_flashcards),
+        )
+        // Knowledge graph.
+        .route("/api/graph", get(routes::graph::get_graph))
+        .route(
+            "/api/graph/communities",
+            get(routes::graph::get_communities),
+        )
+        .route(
+            "/api/graph/community/{nodeId}",
+            get(routes::graph::get_community),
+        )
+        .route("/api/graph/pagerank", get(routes::graph::get_pagerank))
+        .route("/api/graph/stats", get(routes::graph::get_stats))
+        // Review queue.
+        .route("/api/review", get(routes::review::list_review))
+        .route("/api/review/{id}", post(routes::review::resolve_review))
         // Preferences (per-user).
         .route(
             "/api/preferences",

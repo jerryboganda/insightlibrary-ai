@@ -352,6 +352,33 @@ async fn ingest_inner(
 
     // 8. done(100).
     stage(queue, tenant_id, ctx, job.id, S_DONE).await?;
+
+    // 9. Auto-chain the knowledge pipeline (claims → correlate → graph →
+    //    topics) when the org opts in. Best-effort: a failure to enqueue must
+    //    not fail the (already successful) ingest.
+    if final_status == "indexed" {
+        let auto = stores
+            .settings
+            .resolve_org(tenant_id)
+            .await
+            .map(|cfg| crate::settings::org_bool(&cfg, "autoSsotTopics", true))
+            .unwrap_or(false);
+        if auto {
+            if let Err(e) = queue
+                .enqueue(
+                    "knowledge_build",
+                    tenant_id,
+                    &serde_json::json!({ "documentId": ctx.document_id, "userId": ctx.user_id }),
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "failed to enqueue knowledge_build"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
