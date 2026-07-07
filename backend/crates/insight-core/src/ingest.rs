@@ -439,7 +439,7 @@ async fn embed_document(
     }
 
     // Whether to attempt contextual prefixes at all (no key -> skip entirely).
-    let llm_available = crate::llm::provider_from_env().is_some();
+    let llm_available = crate::llm::provider_available(stores, tenant_id).await;
 
     let mut embedded = 0usize;
     let mut contextualized = 0usize;
@@ -478,7 +478,7 @@ async fn embed_document(
             // Contextual prefix only when a key is configured and we're under
             // the per-document cap. Best-effort: a failure leaves prefix NULL.
             let prefix = if llm_available && contextualized < CONTEXTUAL_MAX_CHUNKS {
-                match crate::llm::contextual_prefix(&title, &chunk.text).await {
+                match crate::llm::contextual_prefix(stores, tenant_id, &title, &chunk.text).await {
                     Ok(Some(p)) => {
                         contextualized += 1;
                         Some(p)

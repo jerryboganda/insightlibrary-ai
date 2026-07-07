@@ -23,3 +23,5 @@ argon2 = { workspace = true }
 # Phase 4: ingest orchestration POSTs multipart uploads to parser-svc.
 reqwest = { workspace = true }
 base64 = "0.22"
+# Phase 8: envelope-encrypt BYO provider keys at rest (AES-256-GCM, KEK from env).
+aes-gcm = "0.10"

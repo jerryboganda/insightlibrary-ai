@@ -117,6 +117,16 @@ fn router(state: AppState) -> Router {
             get(routes::admin_settings::get_system_settings)
                 .put(routes::admin_settings::update_system_settings),
         )
+        // Multi-provider AI settings + BYO keys + usage.
+        .route(
+            "/api/ai/providers",
+            get(routes::ai::get_providers).put(routes::ai::set_providers),
+        )
+        .route(
+            "/api/ai/keys",
+            post(routes::ai::save_key).delete(routes::ai::delete_key),
+        )
+        .route("/api/usage", get(routes::usage::get_usage))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::rate_limit,
