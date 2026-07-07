@@ -39,6 +39,16 @@ impl ApiError {
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "forbidden", message)
+    }
+
+    /// 402 Payment Required — used by the budget gate (Phase 8).
+    #[allow(dead_code)]
+    pub fn payment_required(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::PAYMENT_REQUIRED, "payment_required", message)
+    }
 }
 
 impl From<anyhow::Error> for ApiError {

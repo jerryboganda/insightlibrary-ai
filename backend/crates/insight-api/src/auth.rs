@@ -33,15 +33,22 @@ pub struct Claims {
     pub iat: i64,
     /// Token id; refresh jtis live in a Redis allowlist until revoked.
     pub jti: Uuid,
+    /// Session id — stable across refresh rotations, keys the `auth_sessions`
+    /// row so a device can identify + revoke itself. `#[serde(default)]` keeps
+    /// pre-session tokens deserializable (they resolve to the nil uuid).
+    #[serde(default)]
+    pub sid: Uuid,
 }
 
-/// Mint a token of `typ` for the user. Returns `(token, jti)`.
+/// Mint a token of `typ` for the user, bound to session `sid`. Returns
+/// `(token, jti)`.
 pub fn mint(
     cfg: &ApiConfig,
     user_id: Uuid,
     tenant_id: Uuid,
     role: &str,
     typ: &str,
+    sid: Uuid,
 ) -> anyhow::Result<(String, Uuid)> {
     let ttl = match typ {
         "refresh" => cfg.refresh_ttl_secs,
@@ -57,6 +64,7 @@ pub fn mint(
         exp: now + ttl as i64,
         iat: now,
         jti,
+        sid,
     };
     let token = jsonwebtoken::encode(
         &Header::new(Algorithm::HS256),
@@ -131,9 +139,10 @@ pub fn access_token_from_parts(headers: &axum::http::HeaderMap) -> Option<String
 pub struct AuthedUser {
     pub user_id: Uuid,
     pub tenant_id: Uuid,
-    /// Carried for role-gated endpoints in later phases (admin, invites).
-    #[allow(dead_code)]
+    /// Per-org role (owner/admin/editor/viewer), used by [`RequireAdmin`].
     pub role: String,
+    /// Session id carried in the token (nil for pre-session tokens).
+    pub session_id: Uuid,
 }
 
 impl AuthedUser {
@@ -142,6 +151,7 @@ impl AuthedUser {
             user_id: claims.sub,
             tenant_id: claims.ten,
             role: claims.role,
+            session_id: claims.sid,
         }
     }
 
@@ -168,5 +178,56 @@ impl FromRequestParts<AppState> for AuthedUser {
             .ok_or_else(|| ApiError::unauthorized("missing credentials"))?;
         let claims = verify(&state.cfg, &token, "access")?;
         Ok(Self::from_claims(claims))
+    }
+}
+
+/// Extractor that requires the caller's org role to be `admin` or higher
+/// (admin/owner). Rejects anonymous callers 401 and under-privileged 403.
+/// Role comes from the short-lived access token (a demotion takes effect
+/// within the access TTL).
+#[derive(Debug, Clone)]
+pub struct RequireAdmin(pub AuthedUser);
+
+impl FromRequestParts<AppState> for RequireAdmin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = AuthedUser::from_request_parts(parts, state).await?;
+        if insight_core::tenancy::role_rank(&user.role) < insight_core::tenancy::role_rank("admin")
+        {
+            return Err(ApiError::forbidden("requires admin role or higher"));
+        }
+        Ok(Self(user))
+    }
+}
+
+/// Extractor that requires the caller's PLATFORM role to be `super_admin`
+/// (cross-tenant operator). Looked up in the DB per request (rare paths:
+/// system settings, org console).
+#[derive(Debug, Clone)]
+pub struct RequireSuperAdmin(pub AuthedUser);
+
+impl FromRequestParts<AppState> for RequireSuperAdmin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = AuthedUser::from_request_parts(parts, state).await?;
+        let platform_role = insight_core::tenancy::get_platform_role(
+            &state.stores.pool,
+            user.tenant_id,
+            user.user_id,
+        )
+        .await
+        .map_err(ApiError::from)?;
+        if platform_role.as_deref() != Some("super_admin") {
+            return Err(ApiError::forbidden("requires super-admin"));
+        }
+        Ok(Self(user))
     }
 }

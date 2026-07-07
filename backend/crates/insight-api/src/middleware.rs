@@ -103,6 +103,7 @@ pub async fn rate_limit(State(state): State<AppState>, mut req: Request, next: N
         user_id: claims.sub,
         tenant_id: claims.ten,
         role: claims.role.clone(),
+        session_id: claims.sid,
     };
     let tenant_id = user.tenant_id;
     // Let handlers reuse the verification via the extractor.

@@ -144,6 +144,9 @@ pub struct Stores {
     pub graph: PgGraphStore,
     pub blobs: S3BlobStore,
     pub cache: RedisCache,
+    /// Runtime-tunable settings (system/org/user), with a shared TTL cache so
+    /// both the api and the worker read hot-path config cheaply.
+    pub settings: crate::settings::SettingsStore,
     pub config: StorageConfig,
 }
 
@@ -170,6 +173,7 @@ impl Stores {
             graph: PgGraphStore::new(pool.clone()),
             blobs,
             cache,
+            settings: crate::settings::SettingsStore::new(pool.clone()),
             pool,
             config,
         })

@@ -46,6 +46,7 @@ pub async fn realtime(
                 user_id: claims.sub,
                 tenant_id: claims.ten,
                 role: claims.role,
+                session_id: claims.sid,
             }
         }
         None => AuthedUser::maybe(&headers, &state.cfg)

@@ -70,6 +70,16 @@ fn router(state: AppState) -> Router {
         // Alias listed in docs/frontend-api-surface.md (better-auth path the
         // existing client probes).
         .route("/api/auth/session", get(routes::auth::session))
+        // Device sessions (settings page).
+        .route("/api/auth/sessions", get(routes::auth::list_sessions))
+        .route(
+            "/api/auth/sessions/revoke",
+            post(routes::auth::revoke_session),
+        )
+        .route(
+            "/api/auth/sessions/revoke-others",
+            post(routes::auth::revoke_other_sessions),
+        )
         .route("/api/uploads/presign", post(routes::documents::presign))
         .route(
             "/api/documents",
@@ -81,6 +91,32 @@ fn router(state: AppState) -> Router {
             get(routes::search::search_get).post(routes::search::search_post),
         )
         .route("/api/jobs/{id}", get(routes::jobs::get_job))
+        // Preferences (per-user).
+        .route(
+            "/api/preferences",
+            get(routes::preferences::get_preferences).patch(routes::preferences::patch_preferences),
+        )
+        // Org settings (GET any member; PUT admin-gated in the handler).
+        .route(
+            "/api/org/settings",
+            get(routes::org_settings::get_org_settings)
+                .put(routes::org_settings::update_org_settings),
+        )
+        // User administration (admin-gated in the handlers).
+        .route(
+            "/api/users",
+            get(routes::users::list_users).post(routes::users::users_action),
+        )
+        .route(
+            "/api/users/{id}",
+            axum::routing::patch(routes::users::update_user).post(routes::users::user_id_action),
+        )
+        // System settings (super-admin-gated in the handlers).
+        .route(
+            "/api/admin/system-settings",
+            get(routes::admin_settings::get_system_settings)
+                .put(routes::admin_settings::update_system_settings),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::rate_limit,

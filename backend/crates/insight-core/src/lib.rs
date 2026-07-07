@@ -14,6 +14,7 @@ pub mod ingest;
 pub mod llm;
 pub mod ontology;
 pub mod retrieve;
+pub mod settings;
 pub mod storage;
 pub mod study;
 pub mod synth;

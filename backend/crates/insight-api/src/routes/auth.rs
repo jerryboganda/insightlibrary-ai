@@ -1,15 +1,19 @@
-//! Auth endpoints: sign-up, sign-in, refresh (with jti rotation), sign-out,
-//! and the anonymous-friendly session probe.
+//! Auth endpoints: sign-up (invite-aware), sign-in, refresh (jti rotation +
+//! session touch), sign-out, the anonymous-friendly session probe, and the
+//! device-session list/revoke surface the settings page drives.
 //!
-//! Every success response carries the tokens BOTH ways: HTTP-only cookies
-//! for the web shell and `{ accessToken, refreshToken }` in the body for the
-//! Tauri Bearer path.
+//! Every success response carries the tokens BOTH ways: HTTP-only cookies for
+//! the web shell and `{ accessToken, refreshToken }` in the body for the Tauri
+//! Bearer path. Sessions are persisted in `auth_sessions` (keyed by the JWT
+//! `sid`) so a device can list and revoke itself; the Redis refresh allowlist
+//! stays the fast per-request check.
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -66,33 +70,68 @@ fn build_cookie(
         .build()
 }
 
-/// Mint access+refresh, allowlist the refresh jti, set both cookies.
-async fn issue_session(
+/// Best-effort user-agent / client-ip for the device list (leftmost
+/// `X-Forwarded-For` hop, set by the Cloudflare tunnel in production).
+fn user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+fn client_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn set_auth_cookies(jar: CookieJar, access: &str, refresh: &str, secure: bool) -> CookieJar {
+    jar.add(build_cookie(ACCESS_COOKIE, access.to_string(), "/", secure))
+        .add(build_cookie(
+            REFRESH_COOKIE,
+            refresh.to_string(),
+            "/api/auth",
+            secure,
+        ))
+}
+
+/// Mint access+refresh for a NEW session: allocate a `sid`, allowlist the
+/// refresh jti, persist the session row, and set both cookies.
+async fn start_session(
     state: &AppState,
     jar: CookieJar,
+    headers: &HeaderMap,
     user_id: Uuid,
     tenant_id: Uuid,
     role: &str,
 ) -> Result<(CookieJar, String, String), ApiError> {
-    let (access, _) = auth::mint(&state.cfg, user_id, tenant_id, role, "access")?;
-    let (refresh, refresh_jti) = auth::mint(&state.cfg, user_id, tenant_id, role, "refresh")?;
+    let sid = Uuid::new_v4();
+    let (access, _) = auth::mint(&state.cfg, user_id, tenant_id, role, "access", sid)?;
+    let (refresh, refresh_jti) = auth::mint(&state.cfg, user_id, tenant_id, role, "refresh", sid)?;
     auth::allow_refresh(state, refresh_jti, user_id).await?;
 
-    let secure = state.cfg.cookie_secure;
-    let jar = jar
-        .add(build_cookie(ACCESS_COOKIE, access.clone(), "/", secure))
-        .add(build_cookie(
-            REFRESH_COOKIE,
-            refresh.clone(),
-            "/api/auth",
-            secure,
-        ));
+    let expires_at = Utc::now() + chrono::Duration::seconds(state.cfg.refresh_ttl_secs as i64);
+    tenancy::insert_session(
+        &state.stores.pool,
+        tenant_id,
+        sid,
+        user_id,
+        refresh_jti,
+        user_agent(headers).as_deref(),
+        client_ip(headers).as_deref(),
+        expires_at,
+    )
+    .await?;
+
+    let jar = set_auth_cookies(jar, &access, &refresh, state.cfg.cookie_secure);
     Ok((jar, access, refresh))
 }
 
-/// `SessionUser` per packages/schemas sessionUserSchema: org/tenant fields
-/// are flattened INSIDE `user` (the separate `org` key is kept as an
-/// additive convenience).
+/// `SessionUser` per packages/schemas sessionUserSchema. `name` is a required
+/// string on the wire (falls back to email) and `role` is normalized to the
+/// 4-value enum so the frontend Zod parse never rejects.
 fn session_user(
     id: Uuid,
     name: &Option<String>,
@@ -101,11 +140,15 @@ fn session_user(
     tenant_id: Uuid,
     tenant_name: &str,
 ) -> Value {
+    let name = name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(email);
     json!({
         "id": id,
         "name": name,
         "email": email,
-        "role": role,
+        "role": tenancy::normalize_role(role),
         "orgId": tenant_id,
         "orgName": tenant_name,
         "tenantId": tenant_id,
@@ -128,10 +171,12 @@ fn identity_body(identity: &AuthedIdentity, access: &str, refresh: &str) -> Valu
     })
 }
 
-/// `POST /api/auth/sign-up`
+/// `POST /api/auth/sign-up` — honors a pending invitation for the email (joins
+/// the inviting org with the invited role); otherwise creates a personal org.
 pub async fn sign_up(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Json(body): Json<SignUpBody>,
 ) -> Result<(CookieJar, Json<Value>), ApiError> {
     let email = body.email.trim().to_lowercase();
@@ -148,16 +193,17 @@ pub async fn sign_up(
         return Err(ApiError::bad_request("name is required"));
     }
 
-    let identity = tenancy::sign_up(&state.stores.pool, &email, &body.password, name)
+    let identity = tenancy::sign_up_with_invite(&state.stores.pool, &email, &body.password, name)
         .await
         .map_err(|e| match e {
             SignUpError::EmailTaken => ApiError::conflict("email already registered"),
             SignUpError::Other(e) => e.into(),
         })?;
 
-    let (jar, access, refresh) = issue_session(
+    let (jar, access, refresh) = start_session(
         &state,
         jar,
+        &headers,
         identity.user.id,
         identity.tenant.id,
         &identity.user.role,
@@ -166,20 +212,21 @@ pub async fn sign_up(
     Ok((jar, Json(identity_body(&identity, &access, &refresh))))
 }
 
-/// `POST /api/auth/sign-in` — generic 401 on any credential failure (no
-/// user-enumeration; a dummy argon2 verify runs for unknown emails).
+/// `POST /api/auth/sign-in` — generic 401 on any credential failure.
 pub async fn sign_in(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Json(body): Json<SignInBody>,
 ) -> Result<(CookieJar, Json<Value>), ApiError> {
     let identity = tenancy::verify_credentials(&state.stores.pool, &body.email, &body.password)
         .await?
         .ok_or_else(|| ApiError::unauthorized("invalid email or password"))?;
 
-    let (jar, access, refresh) = issue_session(
+    let (jar, access, refresh) = start_session(
         &state,
         jar,
+        &headers,
         identity.user.id,
         identity.tenant.id,
         &identity.user.role,
@@ -188,8 +235,7 @@ pub async fn sign_in(
     Ok((jar, Json(identity_body(&identity, &access, &refresh))))
 }
 
-/// Refresh token from the `insight_refresh` cookie or `{ refreshToken }`
-/// body (the body may be absent entirely).
+/// Refresh token from the `insight_refresh` cookie or `{ refreshToken }` body.
 fn refresh_token_from(jar: &CookieJar, body: &Bytes) -> Option<String> {
     if let Some(cookie) = jar.get(REFRESH_COOKIE) {
         return Some(cookie.value().to_string());
@@ -202,8 +248,8 @@ fn refresh_token_from(jar: &CookieJar, body: &Bytes) -> Option<String> {
         .and_then(|b| b.refresh_token)
 }
 
-/// `POST /api/auth/refresh` — verifies + rotates the refresh jti and issues
-/// a fresh access+refresh pair.
+/// `POST /api/auth/refresh` — verify + rotate the refresh jti, reusing the same
+/// session id, and touch the session row.
 pub async fn refresh(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -217,16 +263,42 @@ pub async fn refresh(
         return Err(ApiError::unauthorized("refresh token revoked"));
     }
 
-    let (jar, access, refresh) =
-        issue_session(&state, jar, claims.sub, claims.ten, &claims.role).await?;
+    let sid = claims.sid;
+    let (access, _) = auth::mint(
+        &state.cfg,
+        claims.sub,
+        claims.ten,
+        &claims.role,
+        "access",
+        sid,
+    )?;
+    let (refresh, refresh_jti) = auth::mint(
+        &state.cfg,
+        claims.sub,
+        claims.ten,
+        &claims.role,
+        "refresh",
+        sid,
+    )?;
+
+    // Rotate the stored jti; a revoked/missing session (nil sid on legacy
+    // tokens) fails closed.
+    if sid.is_nil()
+        || !tenancy::touch_session(&state.stores.pool, claims.ten, sid, refresh_jti).await?
+    {
+        return Err(ApiError::unauthorized("session revoked"));
+    }
+    auth::allow_refresh(&state, refresh_jti, claims.sub).await?;
+
+    let jar = set_auth_cookies(jar, &access, &refresh, state.cfg.cookie_secure);
     Ok((
         jar,
         Json(json!({ "accessToken": access, "refreshToken": refresh })),
     ))
 }
 
-/// `POST /api/auth/sign-out` — revokes the presented refresh jti (cookie or
-/// body) and clears both auth cookies. Always succeeds.
+/// `POST /api/auth/sign-out` — revoke the presented refresh jti + its session
+/// row, and clear both auth cookies. Always succeeds.
 pub async fn sign_out(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -235,6 +307,9 @@ pub async fn sign_out(
     if let Some(token) = refresh_token_from(&jar, &body) {
         if let Ok(claims) = auth::verify(&state.cfg, &token, "refresh") {
             auth::revoke_refresh(&state, claims.jti).await?;
+            if !claims.sid.is_nil() {
+                let _ = tenancy::revoke_session(&state.stores.pool, claims.ten, claims.sid).await;
+            }
         }
     }
     let jar = jar
@@ -247,14 +322,13 @@ pub async fn sign_out(
     Ok((jar, Json(json!({ "ok": true }))))
 }
 
-/// `GET /api/session` — 200 with `authenticated:false` for anonymous
-/// callers (never 401).
+/// `GET /api/session` — 200 with `authenticated:false` for anonymous callers.
+/// Adds `sessionToken` (the current sid) so the frontend auth shim's
+/// getSession can resolve `data.session.token`.
 pub async fn session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    // sessionResponseSchema declares `user` as nullable-but-present, so the
-    // anonymous branch emits an explicit null rather than omitting the key.
     let anonymous = Ok(Json(json!({ "authenticated": false, "user": null })));
 
     let Some(user) = AuthedUser::maybe(&headers, &state.cfg) else {
@@ -271,5 +345,74 @@ pub async fn session(
         "authenticated": true,
         "user": session_user(row.id, &row.name, &row.email, &row.role, tenant.id, &tenant.name),
         "org": { "id": tenant.id, "name": tenant.name },
+        "sessionToken": user.session_id,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// Device sessions (settings page)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/auth/sessions` — the caller's live sessions. `token` = the session
+/// id (what the frontend passes back to revoke); `current` marks this device.
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    user: AuthedUser,
+) -> Result<Json<Value>, ApiError> {
+    let rows = tenancy::list_sessions(&state.stores.pool, user.tenant_id, user.user_id).await?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "token": s.id,
+                "userAgent": s.user_agent,
+                "ipAddress": s.ip_address,
+                "createdAt": s.created_at,
+                "expiresAt": s.expires_at,
+                "lastSeenAt": s.last_seen_at,
+                "current": s.id == user.session_id,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeSessionBody {
+    /// Session id (the frontend calls this field `token`).
+    token: Uuid,
+}
+
+/// `POST /api/auth/sessions/revoke` — revoke one session by id.
+pub async fn revoke_session(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Json(body): Json<RevokeSessionBody>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(jti) =
+        tenancy::revoke_session(&state.stores.pool, user.tenant_id, body.token).await?
+    {
+        auth::revoke_refresh(&state, jti).await?;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `POST /api/auth/sessions/revoke-others` — revoke every session but this one.
+pub async fn revoke_other_sessions(
+    State(state): State<AppState>,
+    user: AuthedUser,
+) -> Result<Json<Value>, ApiError> {
+    let jtis = tenancy::revoke_other_sessions(
+        &state.stores.pool,
+        user.tenant_id,
+        user.user_id,
+        Some(user.session_id),
+    )
+    .await?;
+    let revoked = jtis.len();
+    for jti in jtis {
+        let _ = auth::revoke_refresh(&state, jti).await;
+    }
+    Ok(Json(json!({ "ok": true, "revoked": revoked })))
 }
