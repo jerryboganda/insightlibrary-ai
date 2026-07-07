@@ -1,11 +1,13 @@
 //! HTTP route handlers, grouped by resource.
 
 pub mod admin;
+pub mod admin_orgs;
 pub mod admin_settings;
 pub mod ai;
 pub mod api_keys;
 pub mod audit;
 pub mod auth;
+pub mod billing;
 pub mod copilot;
 pub mod documents;
 pub mod evaluation;

@@ -22,3 +22,5 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 sqlx = { workspace = true }
 redis = { workspace = true }
+# Phase 13: Stripe REST calls from the billing routes.
+reqwest = { workspace = true }

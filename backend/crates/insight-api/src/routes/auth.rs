@@ -223,6 +223,16 @@ pub async fn sign_in(
         .await?
         .ok_or_else(|| ApiError::unauthorized("invalid email or password"))?;
 
+    // A suspended org cannot start new sessions.
+    let suspended: Option<bool> = sqlx::query_scalar("SELECT suspended FROM tenants WHERE id = $1")
+        .bind(identity.tenant.id)
+        .fetch_optional(&state.stores.pool)
+        .await
+        .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+    if suspended == Some(true) {
+        return Err(ApiError::forbidden("this workspace is suspended"));
+    }
+
     let (jar, access, refresh) = start_session(
         &state,
         jar,

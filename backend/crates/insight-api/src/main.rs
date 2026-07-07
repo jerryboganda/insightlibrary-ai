@@ -51,7 +51,9 @@ fn router(state: AppState) -> Router {
     let public = Router::new()
         .route("/healthz", get(routes::health::healthz))
         .route("/readyz", get(routes::health::readyz))
-        .route("/api/health", get(routes::health::api_health));
+        .route("/api/health", get(routes::health::api_health))
+        // Stripe webhook: server-to-server, signature-verified (no session).
+        .route("/api/billing/webhook", post(routes::billing::webhook));
 
     // Anonymous auth endpoints: IP-keyed limiter (the tenant-keyed one is
     // useless pre-auth), throttling credential brute-force and the argon2
@@ -323,6 +325,22 @@ fn router(state: AppState) -> Router {
             post(routes::ai::save_key).delete(routes::ai::delete_key),
         )
         .route("/api/usage", get(routes::usage::get_usage))
+        // Billing (Stripe). status = any session; checkout/portal/invoices admin.
+        .route("/api/billing/status", get(routes::billing::status))
+        .route("/api/billing/checkout", post(routes::billing::checkout))
+        .route("/api/billing/portal", post(routes::billing::portal))
+        .route("/api/billing/invoices", get(routes::billing::invoices))
+        // Super-admin platform console (gated by RequireSuperAdmin in handlers).
+        .route("/api/admin/orgs", get(routes::admin_orgs::list_orgs))
+        .route(
+            "/api/admin/orgs/{id}",
+            axum::routing::patch(routes::admin_orgs::update_org),
+        )
+        .route(
+            "/api/admin/plans",
+            get(routes::admin_orgs::list_plans).post(routes::admin_orgs::upsert_plan),
+        )
+        .route("/api/admin/overview", get(routes::admin_orgs::overview))
         // Audit layer is INNER to rate_limit so the AuthedUser extension it
         // reads has already been populated.
         .layer(axum::middleware::from_fn_with_state(

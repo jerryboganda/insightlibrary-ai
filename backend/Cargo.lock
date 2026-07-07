@@ -1910,6 +1910,7 @@ dependencies = [
  "insight-core",
  "jsonwebtoken",
  "redis",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

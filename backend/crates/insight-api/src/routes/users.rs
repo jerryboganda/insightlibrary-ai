@@ -134,6 +134,12 @@ pub async fn users_action(
             if !email.contains('@') {
                 return Err(ApiError::bad_request("invalid email address"));
             }
+            // Enforce the plan's seat cap.
+            if let Some(msg) =
+                insight_core::billing::check_seat(&state.stores, user.tenant_id).await?
+            {
+                return Err(ApiError::payment_required(msg));
+            }
             let role = role.as_deref().unwrap_or("viewer");
             let inv = tenancy::create_invitation(
                 &state.stores.pool,

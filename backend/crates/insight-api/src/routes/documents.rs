@@ -246,6 +246,13 @@ async fn create_document_inner(
     state: &AppState,
     body: &CreateDocumentBody,
 ) -> Result<Value, ApiError> {
+    // Enforce the plan's document cap.
+    if let Some(msg) =
+        insight_core::billing::check_document_cap(&state.stores, user.tenant_id).await?
+    {
+        return Err(ApiError::payment_required(msg));
+    }
+
     let title = body
         .title
         .clone()
