@@ -182,6 +182,57 @@ fn router(state: AppState) -> Router {
         // Review queue.
         .route("/api/review", get(routes::review::list_review))
         .route("/api/review/{id}", post(routes::review::resolve_review))
+        // Copilot (SSE).
+        .route("/api/copilot", post(routes::copilot::copilot))
+        // Study: flashcards + mcqs.
+        .route("/api/flashcards", get(routes::study::list_flashcards))
+        .route(
+            "/api/flashcards/{id}/review",
+            post(routes::study::review_flashcard),
+        )
+        .route(
+            "/api/mcqs",
+            get(routes::study::list_mcqs).post(routes::study::generate_mcqs),
+        )
+        .route(
+            "/api/mcqs/{id}",
+            axum::routing::patch(routes::study::set_mcq_status),
+        )
+        .route("/api/mcqs/{id}/attempt", post(routes::study::attempt_mcq))
+        // Research suite.
+        .route(
+            "/api/research",
+            get(routes::research::list_research).post(routes::research::create_research),
+        )
+        .route(
+            "/api/research/{id}",
+            get(routes::research::get_research)
+                .patch(routes::research::update_research)
+                .delete(routes::research::delete_research),
+        )
+        .route(
+            "/api/research/{id}/generate",
+            post(routes::research::generate_research),
+        )
+        // Ontology registry + schema + import + linking.
+        .route(
+            "/api/ontologies",
+            get(routes::ontology::list_ontologies).post(routes::ontology::create_ontology),
+        )
+        .route(
+            "/api/ontologies/{id}",
+            axum::routing::delete(routes::ontology::delete_ontology),
+        )
+        .route(
+            "/api/ontologies/{id}/schema",
+            get(routes::ontology::get_schema).put(routes::ontology::put_schema),
+        )
+        .route(
+            "/api/ontologies/import",
+            post(routes::ontology::import_ontology),
+        )
+        .route("/api/ontology/expand", get(routes::ontology::expand))
+        .route("/api/ontology/test", post(routes::ontology::test))
         // Preferences (per-user).
         .route(
             "/api/preferences",
