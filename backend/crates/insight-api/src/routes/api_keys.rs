@@ -94,6 +94,15 @@ pub async fn create_api_key(
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+    // Mirror into the non-RLS auth lookup so the key can authenticate requests
+    // via `X-Api-Key` (see migration 0021). Role defaults to `editor`.
+    sqlx::query("INSERT INTO api_key_auth (hash, key_id, tenant_id) VALUES ($1, $2, $3)")
+        .bind(&key.hash)
+        .bind(id)
+        .bind(user.tenant_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
     tx.commit().await.map_err(anyhow::Error::from)?;
     Ok(Json(json!({
         "id": id, "name": name, "token": key.plaintext, "tokenHint": key.hint,
@@ -115,6 +124,14 @@ pub async fn delete_api_key(
     set_tenant(&mut tx, user.tenant_id).await?;
     sqlx::query("DELETE FROM api_keys WHERE id = $1")
         .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+    // Remove the auth-lookup mirror. Tenant-scoped so a cross-tenant id is a
+    // no-op, matching the RLS-scoped delete above.
+    sqlx::query("DELETE FROM api_key_auth WHERE key_id = $1 AND tenant_id = $2")
+        .bind(id)
+        .bind(user.tenant_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;

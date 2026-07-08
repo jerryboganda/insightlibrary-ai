@@ -174,6 +174,43 @@ impl FromRequestParts<AppState> for AuthedUser {
         if let Some(user) = parts.extensions.get::<AuthedUser>() {
             return Ok(user.clone());
         }
+        // API-key request auth: an `X-Api-Key` header authenticates against the
+        // non-RLS `api_key_auth` lookup (the tenant-scoped `api_keys` table
+        // can't be read before the tenant is known). The key acts as its stored
+        // role (default `editor`); there is no human user/session, so both ids
+        // are nil.
+        if let Some(raw) = parts.headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+            let hash = insight_core::security::sha256_hex(raw.trim());
+            let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+                "SELECT key_id, tenant_id, role FROM api_key_auth WHERE hash = $1 AND NOT revoked",
+            )
+            .bind(&hash)
+            .fetch_optional(&state.stores.pool)
+            .await
+            .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+            let Some((key_id, tenant_id, role)) = row else {
+                return Err(ApiError::unauthorized("invalid api key"));
+            };
+            // Best-effort last-used touch (tenant-scoped, so it needs the GUC).
+            if let Ok(mut tx) = state.stores.pool.begin().await {
+                let scoped = insight_core::storage::set_tenant(&mut tx, tenant_id)
+                    .await
+                    .is_ok();
+                if scoped {
+                    let _ = sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
+                        .bind(key_id)
+                        .execute(&mut *tx)
+                        .await;
+                    let _ = tx.commit().await;
+                }
+            }
+            return Ok(Self {
+                user_id: Uuid::nil(),
+                tenant_id,
+                role,
+                session_id: Uuid::nil(),
+            });
+        }
         let token = access_token_from_parts(&parts.headers)
             .ok_or_else(|| ApiError::unauthorized("missing credentials"))?;
         let claims = verify(&state.cfg, &token, "access")?;
