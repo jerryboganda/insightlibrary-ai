@@ -37,9 +37,9 @@
 		}
 	});
 
-	function fmtDate(iso: string | null | undefined): string {
+	function fmtDate(iso: string | number | null | undefined): string {
 		if (!iso) return '—';
-		return new Date(iso).toLocaleDateString(undefined, {
+		return new Date(typeof iso === 'number' ? iso * 1000 : iso).toLocaleDateString(undefined, {
 			year: 'numeric',
 			month: 'long',
 			day: 'numeric'

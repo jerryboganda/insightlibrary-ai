@@ -351,11 +351,17 @@ pub async fn session(
     let Some(tenant) = tenancy::get_tenant(&state.stores.pool, user.tenant_id).await? else {
         return anonymous;
     };
+    let platform_role =
+        tenancy::get_platform_role(&state.stores.pool, user.tenant_id, user.user_id)
+            .await
+            .unwrap_or(None)
+            .unwrap_or_else(|| "user".into());
     Ok(Json(json!({
         "authenticated": true,
         "user": session_user(row.id, &row.name, &row.email, &row.role, tenant.id, &tenant.name),
         "org": { "id": tenant.id, "name": tenant.name },
         "sessionToken": user.session_id,
+        "platformRole": platform_role,
     })))
 }
 

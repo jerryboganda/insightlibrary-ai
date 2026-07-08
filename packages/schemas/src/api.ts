@@ -33,7 +33,9 @@ export const sessionResponseSchema = z.object({
 	user: sessionUserSchema.nullable(),
 	/** Present when authenticated: the active org and the current session id. */
 	org: z.object({ id: z.string(), name: z.string() }).optional(),
-	sessionToken: z.string().nullish()
+	sessionToken: z.string().nullish(),
+	/** Platform role for super-admin gating; absent/`user` for normal members. */
+	platformRole: z.enum(['user', 'super_admin']).optional()
 });
 export type SessionResponse = z.infer<typeof sessionResponseSchema>;
 

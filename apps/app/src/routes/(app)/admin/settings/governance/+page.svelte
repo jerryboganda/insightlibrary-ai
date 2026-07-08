@@ -45,6 +45,13 @@
 	let searchCandidates = $state(30);
 	let searchRrfK = $state(60);
 	let searchSnippetLength = $state(240);
+
+	// ── Ingestion & linking limits ─────────────────────────────────────────────
+	let parseAiMaxPages = $state(20);
+	let claimsMaxChunks = $state(60);
+	let contextualMaxChunks = $state(150);
+	let ontologyLinkMaxDistance = $state(0.4);
+
 	let promptMode = $state('ask');
 	let promptOverrides = $state<Record<string, string>>({});
 
@@ -78,6 +85,10 @@
 		searchCandidates = s.searchCandidates;
 		searchRrfK = s.searchRrfK;
 		searchSnippetLength = s.searchSnippetLength;
+		parseAiMaxPages = s.parseAiMaxPages;
+		claimsMaxChunks = s.claimsMaxChunks;
+		contextualMaxChunks = s.contextualMaxChunks;
+		ontologyLinkMaxDistance = s.ontologyLinkMaxDistance;
 		promptOverrides = { ...s.copilotPromptOverrides };
 		if (s.sourcePriorityOrder.length) {
 			const byId = new Map(SOURCE_TIERS.map((t) => [t.id, t]));
@@ -133,6 +144,10 @@
 				searchCandidates: int(searchCandidates, 5, 200),
 				searchRrfK: int(searchRrfK, 1, 500),
 				searchSnippetLength: int(searchSnippetLength, 80, 2000),
+				parseAiMaxPages: int(parseAiMaxPages, 1, 500),
+				claimsMaxChunks: int(claimsMaxChunks, 1, 2000),
+				contextualMaxChunks: int(contextualMaxChunks, 0, 5000),
+				ontologyLinkMaxDistance: Math.min(1, Math.max(0, Number(ontologyLinkMaxDistance) || 0.4)),
 				copilotPromptOverrides: Object.keys(overrides).length ? overrides : null,
 				sourcePriorityOrder: sources.map((s) => s.id)
 			}
@@ -476,6 +491,69 @@
 						class="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500/50 focus:outline-none"
 					/>
 					<p class="text-xs text-zinc-600">Default: {defaults?.searchSnippetLength ?? 240}</p>
+				</div>
+			</div>
+
+			<hr class="border-zinc-800/60" />
+
+			<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+				<div class="space-y-1.5">
+					<label class="text-sm font-medium text-zinc-200" for="parse-ai-max">AI parse max pages</label>
+					<input
+						id="parse-ai-max"
+						type="number"
+						min="1"
+						max="500"
+						bind:value={parseAiMaxPages}
+						class="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500/50 focus:outline-none"
+					/>
+					<p class="text-xs text-zinc-600">
+						Pages sent to the AI parser. Default: {defaults?.parseAiMaxPages ?? 20}
+					</p>
+				</div>
+				<div class="space-y-1.5">
+					<label class="text-sm font-medium text-zinc-200" for="claims-max">Claims max chunks</label>
+					<input
+						id="claims-max"
+						type="number"
+						min="1"
+						max="2000"
+						bind:value={claimsMaxChunks}
+						class="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500/50 focus:outline-none"
+					/>
+					<p class="text-xs text-zinc-600">
+						Chunks scanned for claim extraction. Default: {defaults?.claimsMaxChunks ?? 60}
+					</p>
+				</div>
+				<div class="space-y-1.5">
+					<label class="text-sm font-medium text-zinc-200" for="ctx-max">Contextual max chunks</label>
+					<input
+						id="ctx-max"
+						type="number"
+						min="0"
+						max="5000"
+						bind:value={contextualMaxChunks}
+						class="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500/50 focus:outline-none"
+					/>
+					<p class="text-xs text-zinc-600">
+						Chunks given a contextual prefix (0 = off). Default: {defaults?.contextualMaxChunks ?? 150}
+					</p>
+				</div>
+				<div class="space-y-1.5">
+					<label class="text-sm font-medium text-zinc-200" for="onto-dist">Ontology link max distance</label>
+					<input
+						id="onto-dist"
+						type="number"
+						min="0"
+						max="1"
+						step="0.01"
+						bind:value={ontologyLinkMaxDistance}
+						class="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 focus:border-indigo-500/50 focus:outline-none"
+					/>
+					<p class="text-xs text-zinc-600">
+						Max embedding distance to link a concept (0–1). Default: {defaults?.ontologyLinkMaxDistance ??
+							0.4}
+					</p>
 				</div>
 			</div>
 

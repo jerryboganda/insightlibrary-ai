@@ -14,7 +14,11 @@ export const load: LayoutLoad = async () => {
 		if (!session.authenticated || !session.user) {
 			throw redirect(302, '/login');
 		}
-		return { user: session.user, org: session.org ?? null };
+		return {
+			user: session.user,
+			org: session.org ?? null,
+			platformRole: session.platformRole ?? 'user'
+		};
 	} catch (e) {
 		// Re-throw SvelteKit's redirect untouched; treat any real failure (network,
 		// unreachable API) as "not authenticated" and send the user to sign in.

@@ -82,6 +82,57 @@ export interface AuthSessionRow {
 	current: boolean;
 }
 
+/** System settings (super-admin scope) — grouped, restart-aware knobs. */
+export interface SystemSettingsValues {
+	queue: {
+		concurrency: number;
+		maxAttempts: number;
+		claimIdleMs: number;
+		perKindConcurrency: Record<string, number>;
+	};
+	rateLimit: { max: number; windowSecs: number; authMax: number };
+	auth: { accessTtlSecs: number; refreshTtlSecs: number };
+	pipeline: {
+		parseMaxPages: number;
+		parseMaxFileMb: number;
+		lowConfThreshold: number;
+		linkSimThreshold: number;
+	};
+	pricing: { models: unknown[]; providerFallback: Record<string, unknown> };
+}
+export interface SystemSettingsResponse {
+	settings: SystemSettingsValues;
+	defaults: SystemSettingsValues;
+	restartRequired: {
+		inferenceDenseModel: string;
+		inferenceDenseDim: number;
+		inferenceSparseModel: string;
+		inferenceRerankModel: string;
+		parserSvcUrl: string;
+		inferenceSvcUrl: string;
+	};
+}
+/** A tenant/org summary for the super-admin console. */
+export interface AdminOrgSummary {
+	id: string;
+	kind: string;
+	name: string;
+	plan: string;
+	suspended: boolean;
+	createdAt: string;
+}
+/** A plan tier in the catalog. */
+export interface AdminPlan {
+	id: string;
+	name: string;
+	seats: number;
+	documentCap: number;
+	aiBudgetUsd: number;
+	stripePriceId: string | null;
+	features: unknown;
+	active: boolean;
+}
+
 export class ApiError extends Error {
 	constructor(
 		public readonly status: number,
@@ -116,6 +167,26 @@ export interface OrgSettingsValues {
 	searchSnippetLength: number;
 	copilotPromptOverrides: Record<string, string>;
 	sourcePriorityOrder: string[];
+	/** SM-2 / FSRS study-scheduler tuning (nested; patch the whole object). */
+	study: {
+		scheduler: string;
+		sm2: {
+			initialEase: number;
+			minEase: number;
+			firstIntervalDays: number;
+			secondIntervalDays: number;
+		};
+		fsrs: { requestRetention: number; maximumInterval: number };
+	};
+	/** LLM task routing / models / vendor config (also managed via /api/ai/providers). */
+	ai: {
+		taskRouting: Record<string, string>;
+		fallbackOrder: string[];
+		models: Record<string, string>;
+		baseUrls: Record<string, string>;
+		rerankModels: Record<string, string>;
+		parseVendor: string;
+	};
 	/** Monthly AI spend hard limit in USD; 0 = unlimited (no enforcement). */
 	budgetMonthlyLimitUsd: number;
 	/** Soft-alert threshold as a % of the hard limit (default 80). */
@@ -837,7 +908,7 @@ export class ApiClient {
 			invoices: Array<{
 				id: string;
 				number: string | null;
-				created: string;
+				created: number;
 				total: number;
 				currency: string;
 				status: string;
@@ -850,6 +921,41 @@ export class ApiClient {
 	getOrgSettings = () => this.request<OrgSettingsResponse>('/api/org/settings');
 	updateOrgSettings = (input: OrgSettingsUpdate) =>
 		this.request<OrgSettingsResponse>('/api/org/settings', { method: 'PUT', body: JSON.stringify(input) });
+
+	// Super-admin platform console (all RequireSuperAdmin on the server).
+	getSystemSettings = () => this.request<SystemSettingsResponse>('/api/admin/system-settings');
+	updateSystemSettings = (patch: {
+		queue?: Partial<SystemSettingsValues['queue']>;
+		rateLimit?: Partial<SystemSettingsValues['rateLimit']>;
+		auth?: Partial<SystemSettingsValues['auth']>;
+		pipeline?: Partial<SystemSettingsValues['pipeline']>;
+		pricing?: Partial<SystemSettingsValues['pricing']>;
+	}) =>
+		this.request<SystemSettingsResponse>('/api/admin/system-settings', {
+			method: 'PUT',
+			body: JSON.stringify(patch)
+		});
+	listAdminOrgs = () => this.request<{ items: AdminOrgSummary[]; total: number }>('/api/admin/orgs');
+	updateAdminOrg = (id: string, patch: { plan?: string; suspended?: boolean; name?: string }) =>
+		this.request<{ id: string; name: string; plan: string; suspended: boolean }>(
+			`/api/admin/orgs/${id}`,
+			{ method: 'PATCH', body: JSON.stringify(patch) }
+		);
+	listAdminPlans = () => this.request<{ items: AdminPlan[]; total: number }>('/api/admin/plans');
+	upsertAdminPlan = (plan: {
+		id: string;
+		name: string;
+		seats?: number;
+		documentCap?: number;
+		aiBudgetUsd?: number;
+		stripePriceId?: string;
+		features?: unknown;
+		active?: boolean;
+	}) => this.request<AdminPlan>('/api/admin/plans', { method: 'POST', body: JSON.stringify(plan) });
+	getAdminOverview = () =>
+		this.request<{ orgs: number; suspended: number; byPlan: { plan: string; count: number }[] }>(
+			'/api/admin/overview'
+		);
 
 	// Admin
 	/** Usage metering aggregates; period defaults to the current calendar month. */
