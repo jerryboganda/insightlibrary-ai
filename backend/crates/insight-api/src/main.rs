@@ -63,6 +63,10 @@ fn router(state: AppState) -> Router {
         .route("/api/auth/sign-in", post(routes::auth::sign_in))
         .route("/api/auth/refresh", post(routes::auth::refresh))
         .route("/api/auth/sign-out", post(routes::auth::sign_out))
+        // Desktop "Sign in with ChatGPT" OAuth token-exchange proxy (ported
+        // from the retired Node backend). Anonymous — the caller authenticates
+        // to OpenAI via PKCE — but IP-rate-limited alongside the auth routes.
+        .route("/api/ai-oauth/exchange", post(routes::ai_oauth::exchange))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_rate_limit,

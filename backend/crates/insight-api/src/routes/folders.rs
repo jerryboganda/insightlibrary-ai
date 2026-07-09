@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::auth::AuthedUser;
 use crate::error::ApiError;
-use crate::routes::documents::document_json;
+use crate::routes::documents::{document_json, DOC_TOPIC_COUNTS_SQL};
 use crate::state::AppState;
 use insight_core::storage::{set_tenant, DocStore};
 
@@ -24,7 +24,7 @@ struct FolderAgg {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-fn folder_json(f: &FolderAgg) -> Value {
+fn folder_json(f: &FolderAgg, topics: i64) -> Value {
     let health = if f.docs > 0 {
         ((f.indexed as f64 / f.docs as f64) * 100.0).round() as i64
     } else {
@@ -35,7 +35,7 @@ fn folder_json(f: &FolderAgg) -> Value {
         "id": f.id,
         "name": f.name,
         "docs": f.docs,
-        "topics": 0,
+        "topics": topics,
         "health": health,
         "lastUpdated": last.to_rfc3339_opts(SecondsFormat::Millis, true),
     })
@@ -47,6 +47,16 @@ const FOLDER_AGG_SQL: &str = "SELECT f.id, f.name, f.updated_at, \
     MAX(d.added_at) AS last_updated \
   FROM folders f LEFT JOIN documents d ON d.folder_id = f.id \
   {where} GROUP BY f.id, f.name, f.updated_at ORDER BY f.name";
+
+/// Distinct claim-topics grounded across all documents in each folder, keyed by
+/// folder id. `{where}` scopes it (all folders, or one) without letting the
+/// claim_sources join inflate the folder document counts above.
+const FOLDER_TOPIC_COUNTS_SQL: &str = "SELECT d.folder_id, COUNT(DISTINCT c.canonical_topic) \
+    FROM documents d JOIN claim_sources cs ON cs.document_id = d.id \
+    JOIN claims c ON c.id = cs.claim_id \
+    WHERE d.folder_id IS NOT NULL \
+      AND c.canonical_topic IS NOT NULL AND c.canonical_topic <> '' {and} \
+    GROUP BY d.folder_id";
 
 /// `GET /api/folders` → `Folder[]`.
 pub async fn list_folders(
@@ -65,8 +75,19 @@ pub async fn list_folders(
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+    let topic_sql = FOLDER_TOPIC_COUNTS_SQL.replace("{and}", "");
+    let folder_topics: std::collections::HashMap<String, i64> =
+        sqlx::query_as::<_, (String, i64)>(&topic_sql)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| ApiError::from(anyhow::Error::from(e)))?
+            .into_iter()
+            .collect();
     tx.commit().await.map_err(anyhow::Error::from)?;
-    let items: Vec<Value> = rows.iter().map(folder_json).collect();
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|f| folder_json(f, folder_topics.get(&f.id).copied().unwrap_or(0)))
+        .collect();
     let total = items.len();
     Ok(Json(json!({ "items": items, "total": total })))
 }
@@ -164,14 +185,40 @@ pub async fn get_folder(
     .map_err(|e| ApiError::from(anyhow::Error::from(e)))?
     .into_iter()
     .collect();
+    // Folder-level distinct topic count + per-document topic counts.
+    let folder_topics: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT c.canonical_topic) FROM documents d \
+         JOIN claim_sources cs ON cs.document_id = d.id \
+         JOIN claims c ON c.id = cs.claim_id \
+         WHERE d.folder_id = $1 \
+           AND c.canonical_topic IS NOT NULL AND c.canonical_topic <> ''",
+    )
+    .bind(&id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+    let topic_counts: std::collections::HashMap<uuid::Uuid, i64> =
+        sqlx::query_as::<_, (uuid::Uuid, i64)>(DOC_TOPIC_COUNTS_SQL)
+            .bind(&doc_ids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| ApiError::from(anyhow::Error::from(e)))?
+            .into_iter()
+            .collect();
     tx.commit().await.map_err(anyhow::Error::from)?;
 
     let documents: Vec<Value> = rows
         .iter()
-        .map(|r| document_json(r, page_counts.get(&r.id).copied().unwrap_or(0)))
+        .map(|r| {
+            document_json(
+                r,
+                page_counts.get(&r.id).copied().unwrap_or(0),
+                topic_counts.get(&r.id).copied().unwrap_or(0),
+            )
+        })
         .collect();
 
     Ok(Json(
-        json!({ "folder": folder_json(&folder), "documents": documents }),
+        json!({ "folder": folder_json(&folder, folder_topics), "documents": documents }),
     ))
 }

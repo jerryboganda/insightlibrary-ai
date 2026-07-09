@@ -4,6 +4,7 @@ pub mod admin;
 pub mod admin_orgs;
 pub mod admin_settings;
 pub mod ai;
+pub mod ai_oauth;
 pub mod api_keys;
 pub mod audit;
 pub mod auth;

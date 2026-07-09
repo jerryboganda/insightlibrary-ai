@@ -113,10 +113,11 @@ fn doc_type(title: &str, storage_key: &str) -> &'static str {
 }
 
 /// Serialize a document to the frontend `Document` shape. `pages` is the real
-/// persisted page count (from `SELECT count(*) FROM pages`); pass `0` only when
-/// the count is genuinely unknown/not applicable (e.g. list rows where the
-/// per-doc count is not fetched).
-pub(crate) fn document_json(row: &DocumentRow, pages: i64) -> Value {
+/// persisted page count (from `SELECT count(*) FROM pages`) and `topics` is the
+/// count of distinct claim-topics grounded in the document; pass `0` for either
+/// only when the count is genuinely unknown/not applicable (e.g. a freshly
+/// created document that has not been ingested yet).
+pub(crate) fn document_json(row: &DocumentRow, pages: i64, topics: i64) -> Value {
     let status = if row.status == "pending" {
         "processing"
     } else {
@@ -130,8 +131,7 @@ pub(crate) fn document_json(row: &DocumentRow, pages: i64) -> Value {
         "statusLabel": status_label(status),
         "type": doc_type(&row.title, &row.storage_key),
         "pages": pages,
-        // topics is still a Phase-5 placeholder (topic modeling not wired yet).
-        "topics": 0,
+        "topics": topics,
         // use_z: the frontend schema (z.iso.datetime()) rejects `+00:00`.
         "uploadedAt": row.added_at.to_rfc3339_opts(SecondsFormat::Millis, true),
     })
@@ -151,6 +151,44 @@ async fn page_count(state: &AppState, tenant_id: Uuid, document_id: Uuid) -> Res
         .fetch_one(&mut *tx)
         .await
         .map_err(anyhow::Error::from)?;
+    tx.commit().await.map_err(anyhow::Error::from)?;
+    Ok(count)
+}
+
+/// Distinct claim-topics grounded in a batch of documents, keyed by document
+/// id. `claims.canonical_topic` is the topic label attached at claim-extraction
+/// time, so this is "how many distinct topics this document contributes to".
+pub(crate) const DOC_TOPIC_COUNTS_SQL: &str =
+    "SELECT cs.document_id, COUNT(DISTINCT c.canonical_topic) \
+     FROM claim_sources cs JOIN claims c ON c.id = cs.claim_id \
+     WHERE cs.document_id = ANY($1) \
+       AND c.canonical_topic IS NOT NULL AND c.canonical_topic <> '' \
+     GROUP BY cs.document_id";
+
+/// Count distinct claim-topics grounded in one document under the tenant RLS
+/// context.
+async fn topic_count(
+    state: &AppState,
+    tenant_id: Uuid,
+    document_id: Uuid,
+) -> Result<i64, ApiError> {
+    let mut tx = state
+        .stores
+        .pool
+        .begin()
+        .await
+        .map_err(anyhow::Error::from)?;
+    set_tenant(&mut tx, tenant_id).await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT c.canonical_topic) FROM claim_sources cs \
+         JOIN claims c ON c.id = cs.claim_id \
+         WHERE cs.document_id = $1 \
+           AND c.canonical_topic IS NOT NULL AND c.canonical_topic <> ''",
+    )
+    .bind(document_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(anyhow::Error::from)?;
     tx.commit().await.map_err(anyhow::Error::from)?;
     Ok(count)
 }
@@ -325,8 +363,9 @@ async fn create_document_inner(
         .get_document(user.tenant_id, doc_id)
         .await?
         .ok_or_else(|| ApiError::not_found("document vanished after insert"))?;
-    // Freshly created; ingest has not run yet, so there are no pages persisted.
-    let mut doc = document_json(&row, 0);
+    // Freshly created; ingest has not run yet, so there are no pages or
+    // claim-derived topics persisted.
+    let mut doc = document_json(&row, 0, 0);
     doc["jobId"] = json!(job_id);
     Ok(doc)
 }
@@ -388,11 +427,26 @@ pub async fn list_documents(
     .map_err(anyhow::Error::from)?
     .into_iter()
     .collect();
+    // Real topic counts for this page of documents, in one grouped query.
+    let topic_counts: std::collections::HashMap<Uuid, i64> =
+        sqlx::query_as::<_, (Uuid, i64)>(DOC_TOPIC_COUNTS_SQL)
+            .bind(&doc_ids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(anyhow::Error::from)?
+            .into_iter()
+            .collect();
     tx.commit().await.map_err(anyhow::Error::from)?;
 
     let items: Vec<Value> = rows
         .iter()
-        .map(|r| document_json(r, page_counts.get(&r.id).copied().unwrap_or(0)))
+        .map(|r| {
+            document_json(
+                r,
+                page_counts.get(&r.id).copied().unwrap_or(0),
+                topic_counts.get(&r.id).copied().unwrap_or(0),
+            )
+        })
         .collect();
     Ok(Json(json!({ "items": items, "total": total })))
 }
@@ -410,7 +464,8 @@ pub async fn get_document(
         .await?
         .ok_or_else(|| ApiError::not_found("document not found"))?;
     let pages = page_count(&state, user.tenant_id, id).await?;
-    Ok(Json(document_json(&row, pages)))
+    let topics = topic_count(&state, user.tenant_id, id).await?;
+    Ok(Json(document_json(&row, pages, topics)))
 }
 
 const DOWNLOAD_TTL: Duration = Duration::from_secs(15 * 60);
