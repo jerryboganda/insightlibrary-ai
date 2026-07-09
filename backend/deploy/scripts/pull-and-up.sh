@@ -24,3 +24,13 @@ done
 
 # --no-build guarantees no compilation on the VPS; errors if an image is absent.
 bash deploy/scripts/compose.sh up -d --no-build --remove-orphans
+
+# caddy (and cloudflared) bind-mount single config FILES
+# (./Caddyfile:/etc/caddy/Caddyfile, ./cloudflared:/etc/cloudflared). When the
+# rsync above rewrites those files they get a NEW inode, but Docker keeps the
+# running container's bind mount pinned to the OLD inode — and since neither the
+# image nor the env changed, `up -d` does NOT recreate them, so they keep serving
+# the pre-deploy config (this served an empty 200 on insight-app until a manual
+# restart). A `reload` is insufficient: the mounted file itself is the stale
+# inode, so the container must be restarted to re-resolve the path.
+bash deploy/scripts/compose.sh restart caddy cloudflared
